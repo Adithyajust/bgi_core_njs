@@ -1,0 +1,24 @@
+SET NOCOUNT ON;
+SET XACT_ABORT ON;
+
+BEGIN TRY
+  BEGIN TRANSACTION;
+
+  IF OBJECT_ID(N'dbo.pegawai', N'U') IS NULL
+  BEGIN
+    THROW 50501, 'Tabel dbo.pegawai tidak ditemukan.', 1;
+  END;
+
+  IF COL_LENGTH(N'dbo.pegawai', N'alamat') IS NULL
+  BEGIN
+    ALTER TABLE dbo.pegawai
+      ADD alamat NVARCHAR(255) NOT NULL
+      CONSTRAINT DF_pegawai_alamat_migration DEFAULT (N'');
+  END;
+
+  COMMIT TRANSACTION;
+END TRY
+BEGIN CATCH
+  IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+  THROW;
+END CATCH;
