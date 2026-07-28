@@ -8,6 +8,9 @@ export const dynamic = "force-dynamic"
 
 const DEFAULT_PAGE_SIZE = 10
 const MAXIMUM_PAGE_SIZE = 100
+const DEFAULT_AUTOCOMPLETE_LIMIT = 20
+const MAXIMUM_AUTOCOMPLETE_LIMIT = 50
+const AUTOCOMPLETE_SOURCES = new Set(["cabang", "project", "tipe_mesin"])
 
 const SITE_VALUES = new Set(["ONSITE", "OFFSITE"])
 const WARRANTY_VALUES = new Set(["IN WARRANTY", "OUT WARRANTY"])
@@ -126,6 +129,65 @@ function normalizePositiveInteger(value, defaultValue, maximum = null) {
   return maximum === null
     ? parsedValue
     : Math.min(parsedValue, maximum)
+}
+
+function normalizeAutocompleteSource(value) {
+  const source = normalizeText(value).toLowerCase().replaceAll("-", "_")
+  return AUTOCOMPLETE_SOURCES.has(source) ? source : null
+}
+
+function normalizeAutocompleteQuery(value) {
+  return normalizeText(value).slice(0, 100)
+}
+
+function escapeLikePattern(value) {
+  return value
+    .replaceAll("\\", "\\\\")
+    .replaceAll("%", "\\%")
+    .replaceAll("_", "\\_")
+    .replaceAll("[", "\\[")
+    .replaceAll("]", "\\]")
+}
+
+function isDatabaseActive(value) {
+  return value === true || value === 1 || value === "1"
+}
+
+function mapAutocompleteOption(source, row) {
+  if (!row) {
+    return null
+  }
+
+  if (source === "cabang") {
+    return {
+      value: String(row.id),
+      label: `${row.kode_cabang} · ${row.nama_cabang} · ${row.nama_kanwil}`,
+      searchText: `${row.kode_kanwil || ""} ${row.nama_kanwil || ""}`,
+      disabled:
+        !isDatabaseActive(row.is_active) ||
+        !isDatabaseActive(row.kanwil_is_active),
+      data: row,
+    }
+  }
+
+  if (source === "project") {
+    return {
+      value: String(row.id),
+      label: `${row.kode_project} · ${row.nama_project} · ${row.status_project}`,
+      searchText: row.status_project || "",
+      disabled: !isDatabaseActive(row.is_active),
+      data: row,
+    }
+  }
+
+  return {
+    value: String(row.id),
+    label: `${row.nama_merk} · ${row.jenis_mesin} · ${row.nama_model}`,
+    searchText: row.kode_merk || "",
+    disabled:
+      !isDatabaseActive(row.is_active) || !isDatabaseActive(row.merk_is_active),
+    data: row,
+  }
 }
 
 function normalizeBoolean(value, defaultValue = true) {
@@ -605,60 +667,22 @@ export async function GET(request) {
     const db = await connectDB()
     const schema = await getMasterMesinSchema(db)
 
-    if (mode === "options") {
-      const [cabangResult, projectResult, tipeMesinResult] = await Promise.all([
-        db.request().query(`
-          SELECT
-            c.id,
-            c.kode_cabang,
-            c.nama_cabang,
-            k.kode_kanwil,
-            k.nama_kanwil
-          FROM dbo.master_cabang c
-          INNER JOIN dbo.master_kanwil k
-            ON k.id = c.kanwil_id
-          WHERE c.is_active = 1
-            AND k.is_active = 1
-          ORDER BY k.nama_kanwil ASC, c.nama_cabang ASC, c.id ASC;
-        `),
-        db
-          .request()
-          .input("scopeCodeUker", sql.NVarChar(20), scope.codeUker)
-          .query(`
-            SELECT
-              p.id,
-              p.kode_project,
-              p.nama_project,
-              p.status_project
-            FROM dbo.master_project p
-            INNER JOIN dbo.master_uker mu
-              ON mu.id = p.uker_id
-            WHERE p.is_active = 1
-              AND (@scopeCodeUker IS NULL OR mu.codeuker = @scopeCodeUker)
-            ORDER BY p.nama_project ASC, p.id ASC;
-          `),
-        db.request().query(`
-          SELECT
-            t.id,
-            t.jenis_mesin,
-            t.nama_model,
-            m.kode_merk,
-            m.nama_merk
-          FROM dbo.master_tipe_mesin t
-          INNER JOIN dbo.master_merk m
-            ON m.id = t.merk_id
-          WHERE t.is_active = 1
-            AND m.is_active = 1
-          ORDER BY m.nama_merk ASC, t.jenis_mesin ASC, t.nama_model ASC, t.id ASC;
-        `),
-      ])
+    if (mode === "options" || mode === "bootstrap") {
+      const machineCategoryResult = await db.request().query(`
+        SELECT DISTINCT TOP (100)
+          UPPER(LTRIM(RTRIM(t.jenis_mesin))) AS jenis_mesin
+        FROM dbo.master_tipe_mesin t
+        INNER JOIN dbo.master_merk m
+          ON m.id = t.merk_id
+        WHERE t.is_active = 1
+          AND m.is_active = 1
+          AND NULLIF(LTRIM(RTRIM(t.jenis_mesin)), '') IS NOT NULL
+        ORDER BY UPPER(LTRIM(RTRIM(t.jenis_mesin))) ASC;
+      `)
 
       return NextResponse.json({
         success: true,
         data: {
-          cabangs: cabangResult.recordset,
-          projects: projectResult.recordset,
-          tipeMesins: tipeMesinResult.recordset,
           scope: {
             is_super_admin: scope.isSuperAdmin,
             codeuker: scope.codeUker,
@@ -668,14 +692,229 @@ export async function GET(request) {
             tid_enabled: schema.tidEnabled,
           },
           constants: {
+            machine_categories: machineCategoryResult.recordset
+              .map((item) => normalizeUpperText(item.jenis_mesin))
+              .filter(Boolean),
             location_categories: Array.from(LOCATION_CATEGORY_VALUES),
-            // Dipertahankan agar UI versi lama tetap dapat membaca opsi.
             categories: Array.from(LOCATION_CATEGORY_VALUES),
             sites: Array.from(SITE_VALUES),
             warranties: Array.from(WARRANTY_VALUES),
             operation_days: Array.from(OPERATION_DAY_VALUES),
             operation_hours: Array.from(OPERATION_HOUR_VALUES),
             operation_times: Array.from(OPERATION_TIME_VALUES),
+          },
+        },
+      })
+    }
+
+    if (mode === "autocomplete") {
+      const source = normalizeAutocompleteSource(searchParams.get("source"))
+
+      if (!source) {
+        return createErrorResponse(
+          "Sumber autocomplete tidak valid. Gunakan cabang, project, atau tipe_mesin.",
+          400
+        )
+      }
+
+      const query = normalizeAutocompleteQuery(searchParams.get("q"))
+      const limit = normalizePositiveInteger(
+        searchParams.get("limit"),
+        DEFAULT_AUTOCOMPLETE_LIMIT,
+        MAXIMUM_AUTOCOMPLETE_LIMIT
+      )
+      const afterId = normalizeId(searchParams.get("after_id")) || 0
+      const selectedId = normalizeId(searchParams.get("selected_id"))
+      const fetchLimit = limit + 1
+      const escapedQuery = escapeLikePattern(query)
+      const searchPattern = `%${escapedQuery}%`
+
+      let pageRequest
+      let selectedRequest = null
+
+      if (source === "cabang") {
+        pageRequest = db
+          .request()
+          .input("fetchLimit", sql.Int, fetchLimit)
+          .input("afterId", sql.BigInt, afterId)
+          .input("query", sql.NVarChar(100), query)
+          .input("searchPattern", sql.NVarChar(202), searchPattern)
+          .query(`
+            SELECT TOP (@fetchLimit)
+              c.id,
+              c.kode_cabang,
+              c.nama_cabang,
+              c.is_active,
+              k.kode_kanwil,
+              k.nama_kanwil,
+              k.is_active AS kanwil_is_active
+            FROM dbo.master_cabang c
+            INNER JOIN dbo.master_kanwil k
+              ON k.id = c.kanwil_id
+            WHERE c.is_active = 1
+              AND k.is_active = 1
+              AND c.id > @afterId
+              AND (
+                @query = ''
+                OR c.kode_cabang LIKE @searchPattern ESCAPE '\'
+                OR c.nama_cabang LIKE @searchPattern ESCAPE '\'
+                OR k.kode_kanwil LIKE @searchPattern ESCAPE '\'
+                OR k.nama_kanwil LIKE @searchPattern ESCAPE '\'
+              )
+            ORDER BY c.id ASC;
+          `)
+
+        if (selectedId) {
+          selectedRequest = db
+            .request()
+            .input("selectedId", sql.BigInt, selectedId)
+            .query(`
+              SELECT TOP (1)
+                c.id,
+                c.kode_cabang,
+                c.nama_cabang,
+                c.is_active,
+                k.kode_kanwil,
+                k.nama_kanwil,
+                k.is_active AS kanwil_is_active
+              FROM dbo.master_cabang c
+              INNER JOIN dbo.master_kanwil k
+                ON k.id = c.kanwil_id
+              WHERE c.id = @selectedId;
+            `)
+        }
+      } else if (source === "project") {
+        pageRequest = db
+          .request()
+          .input("fetchLimit", sql.Int, fetchLimit)
+          .input("afterId", sql.BigInt, afterId)
+          .input("query", sql.NVarChar(100), query)
+          .input("searchPattern", sql.NVarChar(202), searchPattern)
+          .input("scopeCodeUker", sql.NVarChar(20), scope.codeUker)
+          .query(`
+            SELECT TOP (@fetchLimit)
+              p.id,
+              p.kode_project,
+              p.nama_project,
+              p.status_project,
+              p.is_active,
+              mu.codeuker,
+              mu.nama_uker
+            FROM dbo.master_project p
+            INNER JOIN dbo.master_uker mu
+              ON mu.id = p.uker_id
+            WHERE p.is_active = 1
+              AND p.id > @afterId
+              AND (@scopeCodeUker IS NULL OR mu.codeuker = @scopeCodeUker)
+              AND (
+                @query = ''
+                OR p.kode_project LIKE @searchPattern ESCAPE '\'
+                OR p.nama_project LIKE @searchPattern ESCAPE '\'
+                OR p.status_project LIKE @searchPattern ESCAPE '\'
+              )
+            ORDER BY p.id ASC;
+          `)
+
+        if (selectedId) {
+          selectedRequest = db
+            .request()
+            .input("selectedId", sql.BigInt, selectedId)
+            .input("scopeCodeUker", sql.NVarChar(20), scope.codeUker)
+            .query(`
+              SELECT TOP (1)
+                p.id,
+                p.kode_project,
+                p.nama_project,
+                p.status_project,
+                p.is_active,
+                mu.codeuker,
+                mu.nama_uker
+              FROM dbo.master_project p
+              INNER JOIN dbo.master_uker mu
+                ON mu.id = p.uker_id
+              WHERE p.id = @selectedId
+                AND (@scopeCodeUker IS NULL OR mu.codeuker = @scopeCodeUker);
+            `)
+        }
+      } else {
+        pageRequest = db
+          .request()
+          .input("fetchLimit", sql.Int, fetchLimit)
+          .input("afterId", sql.BigInt, afterId)
+          .input("query", sql.NVarChar(100), query)
+          .input("searchPattern", sql.NVarChar(202), searchPattern)
+          .query(`
+            SELECT TOP (@fetchLimit)
+              t.id,
+              t.jenis_mesin,
+              t.nama_model,
+              t.is_active,
+              m.kode_merk,
+              m.nama_merk,
+              m.is_active AS merk_is_active
+            FROM dbo.master_tipe_mesin t
+            INNER JOIN dbo.master_merk m
+              ON m.id = t.merk_id
+            WHERE t.is_active = 1
+              AND m.is_active = 1
+              AND t.id > @afterId
+              AND (
+                @query = ''
+                OR t.jenis_mesin LIKE @searchPattern ESCAPE '\'
+                OR t.nama_model LIKE @searchPattern ESCAPE '\'
+                OR m.kode_merk LIKE @searchPattern ESCAPE '\'
+                OR m.nama_merk LIKE @searchPattern ESCAPE '\'
+              )
+            ORDER BY t.id ASC;
+          `)
+
+        if (selectedId) {
+          selectedRequest = db
+            .request()
+            .input("selectedId", sql.BigInt, selectedId)
+            .query(`
+              SELECT TOP (1)
+                t.id,
+                t.jenis_mesin,
+                t.nama_model,
+                t.is_active,
+                m.kode_merk,
+                m.nama_merk,
+                m.is_active AS merk_is_active
+              FROM dbo.master_tipe_mesin t
+              INNER JOIN dbo.master_merk m
+                ON m.id = t.merk_id
+              WHERE t.id = @selectedId;
+            `)
+        }
+      }
+
+      const [pageResult, selectedResult] = await Promise.all([
+        pageRequest,
+        selectedRequest || Promise.resolve({ recordset: [] }),
+      ])
+      const hasMore = pageResult.recordset.length > limit
+      const pageRecords = pageResult.recordset.slice(0, limit)
+      const items = pageRecords.map((row) => mapAutocompleteOption(source, row))
+      const selected = mapAutocompleteOption(
+        source,
+        selectedResult.recordset[0] || null
+      )
+
+      return NextResponse.json({
+        success: true,
+        data: {
+          source,
+          query,
+          items,
+          selected,
+          pagination: {
+            limit,
+            has_more: hasMore,
+            next_cursor:
+              hasMore && pageRecords.length > 0
+                ? String(pageRecords[pageRecords.length - 1].id)
+                : null,
           },
         },
       })

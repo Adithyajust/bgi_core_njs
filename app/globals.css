@@ -3306,3 +3306,30 @@ button.machine-autocomplete-toggle:disabled {
   z-index: 5;
   margin-top: 6px;
 }
+
+/* Master Mesin: server-side autocomplete */
+.machine-autocomplete-options button.machine-autocomplete-load-more {
+  position: sticky;
+  bottom: 0;
+  width: 100%;
+  justify-content: center;
+  border-top: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 0;
+  background: var(--surface, #ffffff);
+  font-weight: 700;
+  text-align: center;
+}
+
+.machine-autocomplete-options button.machine-autocomplete-load-more:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.machine-autocomplete-empty.error {
+  color: #b91c1c;
+}
+
+.machine-autocomplete-options button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}

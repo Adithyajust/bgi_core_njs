@@ -414,15 +414,508 @@ function AutocompleteSelect({
   )
 }
 
+
+function mergeAutocompleteOptions(...groups) {
+  const optionMap = new Map()
+
+  for (const group of groups) {
+    for (const option of Array.isArray(group) ? group : []) {
+      if (!option || option.value === undefined || option.value === null) {
+        continue
+      }
+
+      optionMap.set(String(option.value), {
+        ...option,
+        value: String(option.value),
+      })
+    }
+  }
+
+  return Array.from(optionMap.values())
+}
+
+function AsyncAutocompleteSelect({
+  id,
+  name,
+  value,
+  onChange,
+  source,
+  placeholder = "Cari data",
+  disabled = false,
+  allowClear = true,
+  className = "",
+  emptyOptionLabel = "",
+  initialOption = null,
+  limit = 20,
+}) {
+  const rootRef = useRef(null)
+  const typingRef = useRef(false)
+  const requestSequenceRef = useRef(0)
+  const [selectedOption, setSelectedOption] = useState(
+    initialOption && String(initialOption.value) === String(value)
+      ? { ...initialOption, value: String(initialOption.value) }
+      : null
+  )
+  const [query, setQuery] = useState(
+    initialOption && String(initialOption.value) === String(value)
+      ? initialOption.label
+      : ""
+  )
+  const [options, setOptions] = useState([])
+  const [open, setOpen] = useState(false)
+  const [highlightedIndex, setHighlightedIndex] = useState(0)
+  const [loading, setLoading] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [error, setError] = useState("")
+  const [nextCursor, setNextCursor] = useState(null)
+  const [hasMore, setHasMore] = useState(false)
+
+  const selectedValue = selectedOption ? String(selectedOption.value) : ""
+  const normalizedValue = value ? String(value) : ""
+  const searchTerm = typingRef.current ? query.trim() : ""
+
+  useEffect(() => {
+    if (!normalizedValue) {
+      setSelectedOption(null)
+
+      if (!typingRef.current) {
+        setQuery("")
+      }
+      return
+    }
+
+    if (
+      initialOption &&
+      String(initialOption.value) === normalizedValue &&
+      selectedValue !== normalizedValue
+    ) {
+      const normalizedInitialOption = {
+        ...initialOption,
+        value: normalizedValue,
+      }
+      typingRef.current = false
+      setSelectedOption(normalizedInitialOption)
+      setQuery(normalizedInitialOption.label)
+    }
+  }, [
+    initialOption,
+    normalizedValue,
+    selectedValue,
+  ])
+
+  useEffect(() => {
+    function handleOutsideClick(event) {
+      if (rootRef.current && !rootRef.current.contains(event.target)) {
+        typingRef.current = false
+        setOpen(false)
+        setQuery(selectedOption?.label || "")
+      }
+    }
+
+    document.addEventListener("mousedown", handleOutsideClick)
+    return () => document.removeEventListener("mousedown", handleOutsideClick)
+  }, [selectedOption?.label])
+
+  useEffect(() => {
+    const needsSelectedLookup = Boolean(
+      normalizedValue && selectedValue !== normalizedValue
+    )
+
+    if (disabled || (!open && !needsSelectedLookup)) {
+      return undefined
+    }
+
+    const controller = new AbortController()
+    const requestId = requestSequenceRef.current + 1
+    requestSequenceRef.current = requestId
+    const delay = typingRef.current ? 300 : 0
+
+    const timer = window.setTimeout(async () => {
+      try {
+        setLoading(true)
+        setError("")
+
+        const params = new URLSearchParams({
+          mode: "autocomplete",
+          source,
+          limit: String(limit),
+        })
+
+        if (searchTerm) {
+          params.set("q", searchTerm)
+        }
+
+        if (normalizedValue) {
+          params.set("selected_id", normalizedValue)
+        }
+
+        const result = await requestJson(
+          `/api/masters/mesin?${params.toString()}`,
+          {
+            method: "GET",
+            signal: controller.signal,
+          }
+        )
+
+        if (controller.signal.aborted || requestSequenceRef.current !== requestId) {
+          return
+        }
+
+        const resultItems = Array.isArray(result.data?.items)
+          ? result.data.items
+          : []
+        const resultSelected = result.data?.selected || null
+        const emptyOption = emptyOptionLabel
+          ? [{ value: "", label: emptyOptionLabel }]
+          : []
+
+        setOptions(
+          mergeAutocompleteOptions(
+            emptyOption,
+            resultSelected ? [resultSelected] : [],
+            resultItems
+          )
+        )
+        setHasMore(Boolean(result.data?.pagination?.has_more))
+        setNextCursor(result.data?.pagination?.next_cursor || null)
+        setHighlightedIndex(0)
+
+        if (
+          resultSelected &&
+          normalizedValue &&
+          String(resultSelected.value) === normalizedValue
+        ) {
+          const normalizedSelected = {
+            ...resultSelected,
+            value: normalizedValue,
+          }
+          setSelectedOption(normalizedSelected)
+
+          if (!typingRef.current) {
+            setQuery(normalizedSelected.label)
+          }
+        }
+      } catch (fetchError) {
+        if (fetchError?.name === "AbortError") {
+          return
+        }
+
+        setOptions(
+          emptyOptionLabel ? [{ value: "", label: emptyOptionLabel }] : []
+        )
+        setHasMore(false)
+        setNextCursor(null)
+        setError(
+          getErrorMessage(fetchError, "Data autocomplete gagal dimuat.")
+        )
+      } finally {
+        if (!controller.signal.aborted && requestSequenceRef.current === requestId) {
+          setLoading(false)
+        }
+      }
+    }, delay)
+
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [
+    disabled,
+    emptyOptionLabel,
+    limit,
+    normalizedValue,
+    open,
+    searchTerm,
+    selectedValue,
+    source,
+  ])
+
+  async function loadMoreOptions() {
+    if (!nextCursor || loading || loadingMore) {
+      return
+    }
+
+    try {
+      setLoadingMore(true)
+      setError("")
+
+      const params = new URLSearchParams({
+        mode: "autocomplete",
+        source,
+        limit: String(limit),
+        after_id: String(nextCursor),
+      })
+
+      if (searchTerm) {
+        params.set("q", searchTerm)
+      }
+
+      if (normalizedValue) {
+        params.set("selected_id", normalizedValue)
+      }
+
+      const result = await requestJson(
+        `/api/masters/mesin?${params.toString()}`,
+        { method: "GET" }
+      )
+      const resultItems = Array.isArray(result.data?.items)
+        ? result.data.items
+        : []
+
+      setOptions((current) => mergeAutocompleteOptions(current, resultItems))
+      setHasMore(Boolean(result.data?.pagination?.has_more))
+      setNextCursor(result.data?.pagination?.next_cursor || null)
+    } catch (fetchError) {
+      setError(
+        getErrorMessage(fetchError, "Data berikutnya gagal dimuat.")
+      )
+    } finally {
+      setLoadingMore(false)
+    }
+  }
+
+  function selectOption(option) {
+    if (option?.disabled) {
+      return
+    }
+
+    const nextValue = String(option?.value || "")
+    typingRef.current = false
+
+    if (!nextValue) {
+      setSelectedOption(null)
+      setQuery("")
+      onChange("", null)
+    } else {
+      const normalizedOption = { ...option, value: nextValue }
+      setSelectedOption(normalizedOption)
+      setQuery(normalizedOption.label)
+      onChange(nextValue, normalizedOption)
+    }
+
+    setOpen(false)
+    setHighlightedIndex(0)
+  }
+
+  function handleInputChange(event) {
+    const nextQuery = event.target.value
+    typingRef.current = true
+    setQuery(nextQuery)
+    setOpen(true)
+    setHighlightedIndex(0)
+
+    if (normalizedValue) {
+      setSelectedOption(null)
+      onChange("", null)
+    }
+  }
+
+  function handleKeyDown(event) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault()
+      setHighlightedIndex((current) =>
+        !open || options.length === 0
+          ? 0
+          : Math.min(current + 1, options.length - 1)
+      )
+      setOpen(true)
+      return
+    }
+
+    if (event.key === "ArrowUp") {
+      event.preventDefault()
+      setHighlightedIndex((current) =>
+        !open || options.length === 0
+          ? Math.max(options.length - 1, 0)
+          : Math.max(current - 1, 0)
+      )
+      setOpen(true)
+      return
+    }
+
+    if (event.key === "Enter" && open) {
+      event.preventDefault()
+      const option = options[highlightedIndex]
+      if (option) {
+        selectOption(option)
+      }
+      return
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault()
+      typingRef.current = false
+      setOpen(false)
+      setQuery(selectedOption?.label || "")
+    }
+  }
+
+  const hasClearButton = Boolean(normalizedValue && !disabled && allowClear)
+  const rootClassName = [
+    "machine-autocomplete",
+    "machine-autocomplete-remote",
+    open ? "is-open" : "",
+    disabled ? "is-disabled" : "",
+    hasClearButton ? "has-clear" : "",
+    className,
+  ]
+    .filter(Boolean)
+    .join(" ")
+
+  return (
+    <div className={rootClassName} ref={rootRef}>
+      <input type="hidden" name={name} value={normalizedValue} />
+
+      <div className="machine-autocomplete-control">
+        <input
+          id={id}
+          type="text"
+          value={query}
+          onChange={handleInputChange}
+          onFocus={() => {
+            setOpen(true)
+            setHighlightedIndex(0)
+          }}
+          onKeyDown={handleKeyDown}
+          placeholder={placeholder}
+          disabled={disabled}
+          autoComplete="off"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={open}
+          aria-haspopup="listbox"
+          aria-controls={`${id}-options`}
+          aria-activedescendant={
+            open && options[highlightedIndex]
+              ? `${id}-option-${highlightedIndex}`
+              : undefined
+          }
+        />
+
+        {hasClearButton ? (
+          <button
+            type="button"
+            className="machine-autocomplete-clear"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => {
+              typingRef.current = false
+              setSelectedOption(null)
+              setQuery("")
+              setHighlightedIndex(0)
+              setOpen(true)
+              onChange("", null)
+            }}
+            aria-label={`Hapus pilihan ${placeholder}`}
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M18 6 6 18" />
+              <path d="m6 6 12 12" />
+            </svg>
+          </button>
+        ) : null}
+
+        <button
+          type="button"
+          className="machine-autocomplete-toggle"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            setOpen((current) => !current)
+            setHighlightedIndex(0)
+          }}
+          disabled={disabled}
+          aria-label={`${open ? "Tutup" : "Buka"} pilihan ${placeholder}`}
+          aria-expanded={open}
+          aria-controls={`${id}-options`}
+          tabIndex={-1}
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.25"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+        </button>
+      </div>
+
+      {open && !disabled ? (
+        <div
+          id={`${id}-options`}
+          className="machine-autocomplete-options"
+          role="listbox"
+        >
+          {loading && options.length === 0 ? (
+            <div className="machine-autocomplete-empty">Mencari data...</div>
+          ) : options.length > 0 ? (
+            <>
+              {options.map((option, index) => (
+                <button
+                  id={`${id}-option-${index}`}
+                  type="button"
+                  key={String(option.value || `empty-${index}`)}
+                  className={index === highlightedIndex ? "highlighted" : ""}
+                  onMouseEnter={() => setHighlightedIndex(index)}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => selectOption(option)}
+                  role="option"
+                  aria-selected={String(option.value) === normalizedValue}
+                  aria-disabled={Boolean(option.disabled)}
+                  disabled={Boolean(option.disabled)}
+                >
+                  {option.label}
+                </button>
+              ))}
+
+              {hasMore ? (
+                <button
+                  type="button"
+                  className="machine-autocomplete-load-more"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={loadMoreOptions}
+                  disabled={loadingMore}
+                >
+                  {loadingMore ? "Memuat..." : "Muat lainnya"}
+                </button>
+              ) : null}
+            </>
+          ) : (
+            <div className="machine-autocomplete-empty">
+              {error || "Data tidak ditemukan."}
+            </div>
+          )}
+
+          {error && options.length > 0 ? (
+            <div className="machine-autocomplete-empty error">{error}</div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 export default function MasterMesinPage() {
   const router = useRouter()
   const toastTimerRef = useRef(null)
 
   const [currentUser, setCurrentUser] = useState(null)
-  const [cabangs, setCabangs] = useState([])
-  const [projects, setProjects] = useState([])
-  const [tipeMesins, setTipeMesins] = useState([])
   const [constantOptions, setConstantOptions] = useState({
+    machine_categories: [],
     categories: FALLBACK_CATEGORIES,
     sites: FALLBACK_SITES,
     warranties: FALLBACK_WARRANTIES,
@@ -469,6 +962,11 @@ export default function MasterMesinPage() {
   const [modalOpen, setModalOpen] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [form, setForm] = useState(EMPTY_FORM)
+  const [formInitialOptions, setFormInitialOptions] = useState({
+    cabang: null,
+    project: null,
+    tipe_mesin: null,
+  })
   const [saving, setSaving] = useState(false)
   const [modalError, setModalError] = useState("")
 
@@ -492,29 +990,16 @@ export default function MasterMesinPage() {
     () =>
       Array.from(
         new Set(
-          tipeMesins
-            .map((item) => String(item?.jenis_mesin || "").trim().toUpperCase())
+          (constantOptions.machine_categories || [])
+            .map((item) => String(item || "").trim().toUpperCase())
             .filter(Boolean)
         )
       ).sort((a, b) => a.localeCompare(b, "id")),
-    [tipeMesins]
+    [constantOptions.machine_categories]
   )
-  const missingOptionSources = useMemo(() => {
-    if (optionsLoading || optionsError) {
-      return []
-    }
-
-    return [
-      cabangs.length === 0 ? "Cabang" : "",
-      projects.length === 0 ? "Project" : "",
-      tipeMesins.length === 0 ? "Tipe Mesin" : "",
-    ].filter(Boolean)
-  }, [cabangs.length, optionsError, optionsLoading, projects.length, tipeMesins.length])
   const formOptionsReady =
-    schemaInfo.tid_enabled &&
-    !optionsLoading &&
-    !optionsError &&
-    missingOptionSources.length === 0
+    schemaInfo.tid_enabled && !optionsLoading && !optionsError
+
 
   useEffect(() => {
     const controller = new AbortController()
@@ -549,7 +1034,7 @@ export default function MasterMesinPage() {
 
       try {
         const optionsResult = await requestJson(
-          "/api/masters/mesin?mode=options",
+          "/api/masters/mesin?mode=bootstrap",
           {
             method: "GET",
             signal: controller.signal,
@@ -557,21 +1042,6 @@ export default function MasterMesinPage() {
         )
 
         if (!controller.signal.aborted) {
-          setCabangs(
-            Array.isArray(optionsResult.data?.cabangs)
-              ? optionsResult.data.cabangs
-              : []
-          )
-          setProjects(
-            Array.isArray(optionsResult.data?.projects)
-              ? optionsResult.data.projects
-              : []
-          )
-          setTipeMesins(
-            Array.isArray(optionsResult.data?.tipeMesins)
-              ? optionsResult.data.tipeMesins
-              : []
-          )
           setSchemaInfo(
             optionsResult.data?.schema || { tid_enabled: true }
           )
@@ -605,7 +1075,7 @@ export default function MasterMesinPage() {
         setOptionsError(
           getErrorMessage(
             error,
-            "Gagal mengambil sumber autocomplete Cabang, Project, dan Tipe Mesin."
+            "Gagal mengambil konfigurasi Master Mesin."
           )
         )
       } finally {
@@ -800,6 +1270,11 @@ export default function MasterMesinPage() {
   function openCreateModal() {
     setEditingId(null)
     setForm(EMPTY_FORM)
+    setFormInitialOptions({
+      cabang: null,
+      project: null,
+      tipe_mesin: null,
+    })
     setModalError("")
     setModalOpen(true)
   }
@@ -807,6 +1282,29 @@ export default function MasterMesinPage() {
   function openEditModal(item) {
     setEditingId(item.id)
     setForm(mapToForm(item))
+    setFormInitialOptions({
+      cabang: item?.cabang_id
+        ? {
+            value: String(item.cabang_id),
+            label: `${item.kode_cabang || "-"} · ${item.nama_cabang || "Cabang"} · ${item.nama_kanwil || "Kanwil"}`,
+          }
+        : null,
+      project: item?.project_id
+        ? {
+            value: String(item.project_id),
+            label: `${item.kode_project || "-"} · ${item.nama_project || "Project"}`,
+          }
+        : null,
+      tipe_mesin: item?.tipe_mesin_id
+        ? {
+            value: String(item.tipe_mesin_id),
+            label: `${item.nama_merk || "Merk"} · ${item.jenis_mesin || "Jenis"} · ${item.nama_model || "Model"}`,
+            data: {
+              jenis_mesin: item.jenis_mesin || item.kategori_mesin || "",
+            },
+          }
+        : null,
+    })
     setModalError("")
     setModalOpen(true)
   }
@@ -833,15 +1331,15 @@ export default function MasterMesinPage() {
     }))
   }
 
-  function handleTipeMesinChange(value) {
-    const selected = tipeMesins.find((item) => String(item.id) === String(value))
+  function handleTipeMesinChange(value, option) {
+    const jenisMesin = String(option?.data?.jenis_mesin || "")
+      .trim()
+      .toUpperCase()
 
     setForm((current) => ({
       ...current,
       tipe_mesin_id: value,
-      kategori_mesin: selected
-        ? String(selected.jenis_mesin || "").trim().toUpperCase()
-        : "",
+      kategori_mesin: value ? jenisMesin : "",
     }))
   }
 
@@ -1023,7 +1521,7 @@ export default function MasterMesinPage() {
         <div>
           <div className="machine-heading-kicker">
             <p className="eyebrow">Master Data</p>
-            <span className="machine-revision-badge">TID + Autocomplete</span>
+            <span className="machine-revision-badge">Server Autocomplete</span>
           </div>
           <h2>Master Mesin</h2>
           <p>
@@ -1046,12 +1544,10 @@ export default function MasterMesinPage() {
                 !schemaInfo.tid_enabled
                   ? "Jalankan migration 011 terlebih dahulu"
                   : optionsLoading
-                    ? "Sumber autocomplete sedang dimuat"
+                    ? "Konfigurasi form sedang dimuat"
                     : optionsError
-                      ? "Sumber autocomplete gagal dimuat"
-                      : missingOptionSources.length > 0
-                        ? `Lengkapi Master ${missingOptionSources.join(", ")}`
-                        : "Tambah data Mesin"
+                      ? "Konfigurasi form gagal dimuat"
+                      : "Tambah data Mesin"
               }
             >
               Tambah Mesin
@@ -1097,64 +1593,46 @@ export default function MasterMesinPage() {
               aria-label="Cari data Mesin"
             />
 
-            <AutocompleteSelect
+            <AsyncAutocompleteSelect
               id="filter_cabang"
               name="filter_cabang"
+              source="cabang"
               value={cabangFilter}
               onChange={(value) => {
                 setCabangFilter(value)
                 setPage(1)
               }}
               placeholder="Cari Cabang"
+              emptyOptionLabel="Semua Cabang"
               className="machine-filter-autocomplete"
-              options={[
-                { value: "", label: "Semua Cabang" },
-                ...cabangs.map((item) => ({
-                  value: String(item.id),
-                  label: `${item.kode_cabang} · ${item.nama_cabang}`,
-                  searchText: `${item.kode_kanwil || ""} ${item.nama_kanwil || ""}`,
-                })),
-              ]}
             />
 
-            <AutocompleteSelect
+            <AsyncAutocompleteSelect
               id="filter_project"
               name="filter_project"
+              source="project"
               value={projectFilter}
               onChange={(value) => {
                 setProjectFilter(value)
                 setPage(1)
               }}
               placeholder="Cari Project"
+              emptyOptionLabel="Semua Project"
               className="machine-filter-autocomplete"
-              options={[
-                { value: "", label: "Semua Project" },
-                ...projects.map((item) => ({
-                  value: String(item.id),
-                  label: `${item.kode_project} · ${item.nama_project}`,
-                  searchText: item.status_project || "",
-                })),
-              ]}
             />
 
-            <AutocompleteSelect
+            <AsyncAutocompleteSelect
               id="filter_tipe_mesin"
               name="filter_tipe_mesin"
+              source="tipe_mesin"
               value={tipeMesinFilter}
               onChange={(value) => {
                 setTipeMesinFilter(value)
                 setPage(1)
               }}
               placeholder="Cari Tipe Mesin"
+              emptyOptionLabel="Semua Tipe Mesin"
               className="machine-filter-autocomplete"
-              options={[
-                { value: "", label: "Semua Tipe Mesin" },
-                ...tipeMesins.map((item) => ({
-                  value: String(item.id),
-                  label: `${item.nama_merk} · ${item.jenis_mesin} · ${item.nama_model}`,
-                  searchText: item.kode_merk || "",
-                })),
-              ]}
             />
 
             <AutocompleteSelect
@@ -1263,18 +1741,8 @@ export default function MasterMesinPage() {
 
         {optionsError ? (
           <div className="user-role-alert error">
-            <strong>Autocomplete tidak dapat dimuat</strong>
+            <strong>Konfigurasi form tidak dapat dimuat</strong>
             <span>{optionsError}</span>
-          </div>
-        ) : null}
-
-        {missingOptionSources.length > 0 ? (
-          <div className="user-role-alert warning">
-            <strong>Sumber autocomplete masih kosong</strong>
-            <span>
-              Lengkapi Master {missingOptionSources.join(", ")} terlebih dahulu.
-              Project juga mengikuti scope unit kerja pengguna aktif.
-            </span>
           </div>
         ) : null}
 
@@ -1580,33 +2048,40 @@ export default function MasterMesinPage() {
 
                 <div className="user-role-form-field">
                   <label htmlFor="cabang_id">Cabang Pengelola *</label>
-                  <AutocompleteSelect
+                  <AsyncAutocompleteSelect
                     id="cabang_id"
                     name="cabang_id"
+                    source="cabang"
                     value={form.cabang_id}
-                    onChange={(value) => updateForm("cabang_id", value)}
+                    onChange={(value, option) => {
+                      updateForm("cabang_id", value)
+                      setFormInitialOptions((current) => ({
+                        ...current,
+                        cabang: option,
+                      }))
+                    }}
                     placeholder="Cari dan pilih Cabang"
-                    options={cabangs.map((item) => ({
-                      value: String(item.id),
-                      label: `${item.kode_cabang} · ${item.nama_cabang} · ${item.nama_kanwil}`,
-                      searchText: `${item.kode_kanwil || ""} ${item.nama_kanwil || ""}`,
-                    }))}
+                    initialOption={formInitialOptions.cabang}
                   />
                   <small>Cabang bertanggung jawab mengelola mesin.</small>
                 </div>
 
                 <div className="user-role-form-field">
                   <label htmlFor="project_id">Project *</label>
-                  <AutocompleteSelect
+                  <AsyncAutocompleteSelect
                     id="project_id"
                     name="project_id"
+                    source="project"
                     value={form.project_id}
-                    onChange={(value) => updateForm("project_id", value)}
+                    onChange={(value, option) => {
+                      updateForm("project_id", value)
+                      setFormInitialOptions((current) => ({
+                        ...current,
+                        project: option,
+                      }))
+                    }}
                     placeholder="Cari dan pilih Project"
-                    options={projects.map((item) => ({
-                      value: String(item.id),
-                      label: `${item.kode_project} · ${item.nama_project} · ${item.status_project}`,
-                    }))}
+                    initialOption={formInitialOptions.project}
                   />
                 </div>
 
@@ -1643,17 +2118,20 @@ export default function MasterMesinPage() {
 
                 <div className="user-role-form-field">
                   <label htmlFor="tipe_mesin_id">Tipe Mesin *</label>
-                  <AutocompleteSelect
+                  <AsyncAutocompleteSelect
                     id="tipe_mesin_id"
                     name="tipe_mesin_id"
+                    source="tipe_mesin"
                     value={form.tipe_mesin_id}
-                    onChange={handleTipeMesinChange}
+                    onChange={(value, option) => {
+                      handleTipeMesinChange(value, option)
+                      setFormInitialOptions((current) => ({
+                        ...current,
+                        tipe_mesin: option,
+                      }))
+                    }}
                     placeholder="Cari Merk, jenis, atau model"
-                    options={tipeMesins.map((item) => ({
-                      value: String(item.id),
-                      label: `${item.nama_merk} · ${item.jenis_mesin} · ${item.nama_model}`,
-                      searchText: item.kode_merk || "",
-                    }))}
+                    initialOption={formInitialOptions.tipe_mesin}
                   />
                 </div>
 
