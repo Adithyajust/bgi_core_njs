@@ -3,12 +3,14 @@
 import Link from "next/link"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
+import { useAppBootstrap } from "@/components/app-bootstrap-context"
 
 const EMPTY_FORM = {
   kanwil_id: "",
   kode_cabang: "",
   nama_cabang: "",
   is_active: true,
+  row_version: "",
 }
 
 function formatDateTime(value) {
@@ -64,6 +66,7 @@ function mapToForm(item) {
     kode_cabang: String(item?.kode_cabang || ""),
     nama_cabang: String(item?.nama_cabang || ""),
     is_active: Boolean(item?.is_active),
+    row_version: String(item?.row_version || ""),
   }
 }
 
@@ -73,9 +76,9 @@ function getErrorMessage(error, fallback) {
 
 export default function MasterCabangPage() {
   const router = useRouter()
+  const { user: currentUser } = useAppBootstrap()
   const toastTimerRef = useRef(null)
 
-  const [currentUser, setCurrentUser] = useState(null)
   const [kanwilOptions, setKanwilOptions] = useState([])
   const [cabangs, setCabangs] = useState([])
   const [summary, setSummary] = useState({
@@ -129,19 +132,12 @@ export default function MasterCabangPage() {
 
     async function loadIdentityAndOptions() {
       try {
-        const [userResult, kanwilResult] = await Promise.all([
-          requestJson("/api/auth/me", {
-            method: "GET",
-            signal: controller.signal,
-          }),
-          requestJson("/api/masters/kanwil?mode=options&include_inactive=true", {
-            method: "GET",
-            signal: controller.signal,
-          }),
-        ])
+        const kanwilResult = await requestJson(
+          "/api/masters/kanwil?mode=options&include_inactive=true",
+          { method: "GET", signal: controller.signal }
+        )
 
         if (!controller.signal.aborted) {
-          setCurrentUser(userResult.data)
           setKanwilOptions(
             Array.isArray(kanwilResult.data?.kanwils)
               ? kanwilResult.data.kanwils
@@ -385,6 +381,7 @@ export default function MasterCabangPage() {
         kode_cabang: form.kode_cabang.trim().toUpperCase(),
         nama_cabang: form.nama_cabang.trim(),
         is_active: form.is_active,
+        row_version: form.row_version,
       }
 
       const result = await requestJson("/api/masters/cabang", {

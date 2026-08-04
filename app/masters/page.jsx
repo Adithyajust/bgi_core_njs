@@ -45,6 +45,12 @@ const masterMenus = [
       "Kelola data project, customer, unit kerja, Project Manager, status, dan progress pekerjaan.",
     href: "/masters/project",
   },
+  {
+    title: "Master Kendaraan",
+    description:
+      "Kelola kendaraan operasional berdasarkan unit kerja, jenis, merk, nomor kendaraan, dan status.",
+    href: "/masters/kendaraan",
+  },
 ]
 
 export default function MastersPage() {

@@ -1,7 +1,19 @@
 import { NextResponse } from "next/server"
 
-import { authorizeApiRequest, getUserDataScope } from "@/lib/access-control"
+import { authorizeApiRequest, getUserDataScope, hasMenuAccess } from "@/lib/access-control"
 import { connectDB, sql } from "@/lib/mssql"
+import { writeAuditLog } from "@/lib/security/audit-log"
+import { createSearchPatterns, escapeLikePattern } from "@/modules/master-mesin/search"
+import { validateMachinePayload } from "@/modules/master-mesin/validation"
+import { normalizeRowVersionToken } from "@/modules/master-mesin/row-version"
+import {
+  LOCATION_CATEGORY_VALUES,
+  OPERATION_DAY_VALUES,
+  OPERATION_HOUR_VALUES,
+  OPERATION_TIME_VALUES,
+  SITE_VALUES,
+  WARRANTY_VALUES,
+} from "@/modules/master-mesin/constants"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -11,49 +23,6 @@ const MAXIMUM_PAGE_SIZE = 100
 const DEFAULT_AUTOCOMPLETE_LIMIT = 20
 const MAXIMUM_AUTOCOMPLETE_LIMIT = 50
 const AUTOCOMPLETE_SOURCES = new Set(["cabang", "project", "tipe_mesin"])
-
-const SITE_VALUES = new Set(["ONSITE", "OFFSITE"])
-const WARRANTY_VALUES = new Set(["IN WARRANTY", "OUT WARRANTY"])
-const OPERATION_DAY_VALUES = new Set(["WEEKDAYS", "ALL DAYS"])
-const OPERATION_HOUR_VALUES = new Set(["24 JAM", "NON 24 JAM"])
-const OPERATION_TIME_VALUES = new Set([
-  "00:00 - 23:59",
-  "06:00 - 15:00",
-  "06:00 - 18:00",
-  "06:00 - 21:00",
-  "09:00 - 18:00",
-  "09:00 - 21:00",
-])
-const LOCATION_CATEGORY_VALUES = new Set([
-  "ALFAMART",
-  "ALFAMIDI",
-  "APARTEMEN",
-  "BANDARA",
-  "HOTEL",
-  "INDOMARET",
-  "INSTANSI BUMN/BUMD",
-  "INSTANSI MILITER",
-  "INSTANSI PEMERINTAHAN",
-  "KC",
-  "KCP",
-  "KEPOLISIAN",
-  "KK",
-  "MALL",
-  "MINI MARKET",
-  "PASAR",
-  "PERKANTORAN",
-  "PERUMAHAN",
-  "PLAZA",
-  "RUMAH SAKIT",
-  "SPBU",
-  "STASIUN",
-  "SWALAYAN",
-  "TEMPAT HIBURAN",
-  "TEMPAT OLAHRAGA",
-  "TEMPAT PENDIDIKAN",
-  "TEMPAT WISATA",
-  "UNIT BRI",
-])
 
 function createErrorResponse(message, status = 400, extra = {}) {
   return NextResponse.json(
@@ -105,10 +74,6 @@ function normalizeText(value) {
   return typeof value === "string" ? value.trim() : ""
 }
 
-function normalizeNullableText(value) {
-  const normalized = normalizeText(value)
-  return normalized || null
-}
 
 function normalizeUpperText(value) {
   return normalizeText(value).toUpperCase()
@@ -117,6 +82,20 @@ function normalizeUpperText(value) {
 function normalizeId(value) {
   const id = Number(value)
   return Number.isSafeInteger(id) && id > 0 ? id : null
+}
+
+function normalizeDateSecond(value) {
+  if (!value) {
+    return null
+  }
+
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return null
+  }
+
+  return Math.floor(date.getTime() / 1000)
 }
 
 function normalizePositiveInteger(value, defaultValue, maximum = null) {
@@ -140,14 +119,6 @@ function normalizeAutocompleteQuery(value) {
   return normalizeText(value).slice(0, 100)
 }
 
-function escapeLikePattern(value) {
-  return value
-    .replaceAll("\\", "\\\\")
-    .replaceAll("%", "\\%")
-    .replaceAll("_", "\\_")
-    .replaceAll("[", "\\[")
-    .replaceAll("]", "\\]")
-}
 
 function isDatabaseActive(value) {
   return value === true || value === 1 || value === "1"
@@ -190,32 +161,6 @@ function mapAutocompleteOption(source, row) {
   }
 }
 
-function normalizeBoolean(value, defaultValue = true) {
-  if (value === undefined || value === null || value === "") {
-    return defaultValue
-  }
-
-  if (
-    value === true ||
-    value === 1 ||
-    value === "1" ||
-    String(value).toLowerCase() === "true"
-  ) {
-    return true
-  }
-
-  if (
-    value === false ||
-    value === 0 ||
-    value === "0" ||
-    String(value).toLowerCase() === "false"
-  ) {
-    return false
-  }
-
-  return defaultValue
-}
-
 function parseActiveFilter(value) {
   const normalizedValue = normalizeText(value).toLowerCase()
 
@@ -234,177 +179,9 @@ function parseActiveFilter(value) {
   return null
 }
 
-function parseNullableCoordinate(value, label, minimum, maximum) {
-  if (value === undefined || value === null || value === "") {
-    return { value: null, error: null }
-  }
 
-  const parsedValue = Number(value)
-
-  if (!Number.isFinite(parsedValue)) {
-    return { value: null, error: `${label} harus berupa angka.` }
-  }
-
-  if (parsedValue < minimum || parsedValue > maximum) {
-    return {
-      value: null,
-      error: `${label} harus berada pada rentang ${minimum} sampai ${maximum}.`,
-    }
-  }
-
-  return {
-    value: Number(parsedValue.toFixed(6)),
-    error: null,
-  }
-}
-
-function validatePayload(body) {
-  const tid = normalizeUpperText(body?.tid)
-  const sn = normalizeUpperText(body?.sn)
-  const dbValue = normalizeNullableText(body?.db)
-  const cabangId = normalizeId(body?.cabang_id)
-  const projectId = normalizeId(body?.project_id)
-  const lokasi = normalizeText(body?.lokasi)
-  const site = normalizeUpperText(body?.site)
-  const tipeMesinId = normalizeId(body?.tipe_mesin_id)
-  const kategoriMesin = normalizeUpperText(body?.kategori_mesin)
-  const kategoriLokasi = normalizeUpperText(
-    body?.kategori_lokasi ?? body?.kategori
-  )
-  const garansi = normalizeUpperText(body?.garansi)
-  const hariOps = normalizeUpperText(body?.hari_ops)
-  const jamOps = normalizeUpperText(body?.jam_ops)
-  const waktuOps = normalizeText(body?.waktu_ops)
-  const longitude = parseNullableCoordinate(
-    body?.longitude,
-    "Longitude",
-    -180,
-    180
-  )
-  const latitude = parseNullableCoordinate(
-    body?.latitude,
-    "Latitude",
-    -90,
-    90
-  )
-  const isActive = normalizeBoolean(body?.is_active, true)
-
-  if (!tid) {
-    return { error: "TID wajib diisi.", data: null }
-  }
-
-  if (tid.length > 50) {
-    return { error: "TID maksimal 50 karakter.", data: null }
-  }
-
-  if (!sn) {
-    return { error: "SN wajib diisi.", data: null }
-  }
-
-  if (sn.length > 100) {
-    return { error: "SN maksimal 100 karakter.", data: null }
-  }
-
-  if (dbValue && dbValue.length > 100) {
-    return { error: "DB maksimal 100 karakter.", data: null }
-  }
-
-  if (!cabangId) {
-    return { error: "Cabang pengelola wajib dipilih.", data: null }
-  }
-
-  if (!projectId) {
-    return { error: "Project wajib dipilih.", data: null }
-  }
-
-  if (!lokasi) {
-    return { error: "Lokasi fisik mesin wajib diisi.", data: null }
-  }
-
-  if (lokasi.length > 500) {
-    return { error: "Lokasi maksimal 500 karakter.", data: null }
-  }
-
-  if (!SITE_VALUES.has(site)) {
-    return { error: "Site tidak valid.", data: null }
-  }
-
-  if (!tipeMesinId) {
-    return { error: "Tipe Mesin wajib dipilih.", data: null }
-  }
-
-  if (kategoriMesin && kategoriMesin.length > 100) {
-    return { error: "Kategori Mesin maksimal 100 karakter.", data: null }
-  }
-
-  if (!LOCATION_CATEGORY_VALUES.has(kategoriLokasi)) {
-    return { error: "Kategori Lokasi tidak valid.", data: null }
-  }
-
-  if (!WARRANTY_VALUES.has(garansi)) {
-    return { error: "Status garansi tidak valid.", data: null }
-  }
-
-  if (!OPERATION_DAY_VALUES.has(hariOps)) {
-    return { error: "Hari operasional tidak valid.", data: null }
-  }
-
-  if (!OPERATION_HOUR_VALUES.has(jamOps)) {
-    return { error: "Jam operasional tidak valid.", data: null }
-  }
-
-  if (!OPERATION_TIME_VALUES.has(waktuOps)) {
-    return { error: "Waktu operasional tidak valid.", data: null }
-  }
-
-  if (jamOps === "24 JAM" && waktuOps !== "00:00 - 23:59") {
-    return {
-      error: "Mesin dengan Jam Operasional 24 JAM harus memakai waktu 00:00 - 23:59.",
-      data: null,
-    }
-  }
-
-  if (jamOps === "NON 24 JAM" && waktuOps === "00:00 - 23:59") {
-    return {
-      error: "Mesin NON 24 JAM harus memakai rentang waktu selain 00:00 - 23:59.",
-      data: null,
-    }
-  }
-
-  if (longitude.error) {
-    return { error: longitude.error, data: null }
-  }
-
-  if (latitude.error) {
-    return { error: latitude.error, data: null }
-  }
-
-  return {
-    error: null,
-    data: {
-      tid,
-      sn,
-      dbValue,
-      cabangId,
-      projectId,
-      lokasi,
-      site,
-      tipeMesinId,
-      kategoriMesin,
-      kategoriLokasi,
-      garansi,
-      hariOps,
-      jamOps,
-      waktuOps,
-      longitude: longitude.value,
-      latitude: latitude.value,
-      isActive,
-    },
-  }
-}
-
-async function authorizeMaster(request) {
-  return authorizeApiRequest(request, "/masters")
+async function authorizeMaster(request, action = "view") {
+  return authorizeApiRequest(request, "/masters", action)
 }
 
 function resolveDataScope(authorization) {
@@ -585,7 +362,9 @@ async function getById(db, id, scopeCodeUker = null, schema = { tidEnabled: true
         ms.latitude,
         ms.is_active,
         ms.created_at,
-        ms.updated_at
+        ms.updated_at,
+        CONVERT(VARCHAR(18), CONVERT(VARBINARY(8), ms.row_version), 1) AS row_version,
+        CONVERT(VARCHAR(18), CONVERT(VARBINARY(8), ms.row_version), 1) AS row_version_hex
       FROM dbo.master_mesin ms
       LEFT JOIN dbo.master_cabang c
         ON c.id = ms.cabang_id
@@ -647,7 +426,7 @@ async function validateReferences(db, data, scopeCodeUker = null) {
 }
 
 export async function GET(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "view")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -668,7 +447,8 @@ export async function GET(request) {
     const schema = await getMasterMesinSchema(db)
 
     if (mode === "options" || mode === "bootstrap") {
-      const machineCategoryResult = await db.request().query(`
+      const [machineCategoryResult, canCreate, canUpdate, canDelete] = await Promise.all([
+        db.request().query(`
         SELECT DISTINCT TOP (100)
           UPPER(LTRIM(RTRIM(t.jenis_mesin))) AS jenis_mesin
         FROM dbo.master_tipe_mesin t
@@ -678,7 +458,11 @@ export async function GET(request) {
           AND m.is_active = 1
           AND NULLIF(LTRIM(RTRIM(t.jenis_mesin)), '') IS NOT NULL
         ORDER BY UPPER(LTRIM(RTRIM(t.jenis_mesin))) ASC;
-      `)
+        `),
+        hasMenuAccess(authorization.user.role_id, "/masters", "create"),
+        hasMenuAccess(authorization.user.role_id, "/masters", "update"),
+        hasMenuAccess(authorization.user.role_id, "/masters", "delete"),
+      ])
 
       return NextResponse.json({
         success: true,
@@ -686,7 +470,10 @@ export async function GET(request) {
           scope: {
             is_super_admin: scope.isSuperAdmin,
             codeuker: scope.codeUker,
-            can_manage: true,
+            can_view: true,
+            can_create: canCreate,
+            can_update: canUpdate,
+            can_delete: canDelete,
           },
           schema: {
             tid_enabled: schema.tidEnabled,
@@ -727,7 +514,8 @@ export async function GET(request) {
       const selectedId = normalizeId(searchParams.get("selected_id"))
       const fetchLimit = limit + 1
       const escapedQuery = escapeLikePattern(query)
-      const searchPattern = `%${escapedQuery}%`
+      const prefixPattern = `${escapedQuery}%`
+      const containsPattern = `%${escapedQuery}%`
 
       let pageRequest
       let selectedRequest = null
@@ -738,7 +526,8 @@ export async function GET(request) {
           .input("fetchLimit", sql.Int, fetchLimit)
           .input("afterId", sql.BigInt, afterId)
           .input("query", sql.NVarChar(100), query)
-          .input("searchPattern", sql.NVarChar(202), searchPattern)
+          .input("prefixPattern", sql.NVarChar(202), prefixPattern)
+          .input("containsPattern", sql.NVarChar(202), containsPattern)
           .query(`
             SELECT TOP (@fetchLimit)
               c.id,
@@ -756,10 +545,10 @@ export async function GET(request) {
               AND c.id > @afterId
               AND (
                 @query = ''
-                OR c.kode_cabang LIKE @searchPattern ESCAPE '\'
-                OR c.nama_cabang LIKE @searchPattern ESCAPE '\'
-                OR k.kode_kanwil LIKE @searchPattern ESCAPE '\'
-                OR k.nama_kanwil LIKE @searchPattern ESCAPE '\'
+                OR c.kode_cabang LIKE @prefixPattern ESCAPE '\'
+                OR c.nama_cabang LIKE @containsPattern ESCAPE '\'
+                OR k.kode_kanwil LIKE @prefixPattern ESCAPE '\'
+                OR k.nama_kanwil LIKE @containsPattern ESCAPE '\'
               )
             ORDER BY c.id ASC;
           `)
@@ -789,7 +578,8 @@ export async function GET(request) {
           .input("fetchLimit", sql.Int, fetchLimit)
           .input("afterId", sql.BigInt, afterId)
           .input("query", sql.NVarChar(100), query)
-          .input("searchPattern", sql.NVarChar(202), searchPattern)
+          .input("prefixPattern", sql.NVarChar(202), prefixPattern)
+          .input("containsPattern", sql.NVarChar(202), containsPattern)
           .input("scopeCodeUker", sql.NVarChar(20), scope.codeUker)
           .query(`
             SELECT TOP (@fetchLimit)
@@ -808,9 +598,9 @@ export async function GET(request) {
               AND (@scopeCodeUker IS NULL OR mu.codeuker = @scopeCodeUker)
               AND (
                 @query = ''
-                OR p.kode_project LIKE @searchPattern ESCAPE '\'
-                OR p.nama_project LIKE @searchPattern ESCAPE '\'
-                OR p.status_project LIKE @searchPattern ESCAPE '\'
+                OR p.kode_project LIKE @prefixPattern ESCAPE '\'
+                OR p.nama_project LIKE @containsPattern ESCAPE '\'
+                OR p.status_project LIKE @prefixPattern ESCAPE '\'
               )
             ORDER BY p.id ASC;
           `)
@@ -842,7 +632,8 @@ export async function GET(request) {
           .input("fetchLimit", sql.Int, fetchLimit)
           .input("afterId", sql.BigInt, afterId)
           .input("query", sql.NVarChar(100), query)
-          .input("searchPattern", sql.NVarChar(202), searchPattern)
+          .input("prefixPattern", sql.NVarChar(202), prefixPattern)
+          .input("containsPattern", sql.NVarChar(202), containsPattern)
           .query(`
             SELECT TOP (@fetchLimit)
               t.id,
@@ -860,10 +651,10 @@ export async function GET(request) {
               AND t.id > @afterId
               AND (
                 @query = ''
-                OR t.jenis_mesin LIKE @searchPattern ESCAPE '\'
-                OR t.nama_model LIKE @searchPattern ESCAPE '\'
-                OR m.kode_merk LIKE @searchPattern ESCAPE '\'
-                OR m.nama_merk LIKE @searchPattern ESCAPE '\'
+                OR t.jenis_mesin LIKE @containsPattern ESCAPE '\'
+                OR t.nama_model LIKE @containsPattern ESCAPE '\'
+                OR m.kode_merk LIKE @prefixPattern ESCAPE '\'
+                OR m.nama_merk LIKE @containsPattern ESCAPE '\'
               )
             ORDER BY t.id ASC;
           `)
@@ -920,6 +711,38 @@ export async function GET(request) {
       })
     }
 
+    if (mode === "summary") {
+      const summaryResult = await db
+        .request()
+        .input("scopeCodeUker", sql.NVarChar(20), scope.codeUker)
+        .query(`
+          SELECT
+            COUNT_BIG(1) AS total,
+            SUM(CASE WHEN ms.is_active = 1 THEN 1 ELSE 0 END) AS active,
+            SUM(CASE WHEN ms.site = 'ONSITE' THEN 1 ELSE 0 END) AS onsite,
+            SUM(CASE WHEN ms.site = 'OFFSITE' THEN 1 ELSE 0 END) AS offsite,
+            SUM(CASE WHEN ms.garansi = 'IN WARRANTY' THEN 1 ELSE 0 END) AS in_warranty
+          FROM dbo.master_mesin ms
+          INNER JOIN dbo.master_project p ON p.id = ms.project_id
+          INNER JOIN dbo.master_uker mu ON mu.id = p.uker_id
+          WHERE @scopeCodeUker IS NULL OR mu.codeuker = @scopeCodeUker;
+        `)
+      const row = summaryResult.recordset[0] || {}
+
+      return NextResponse.json({
+        success: true,
+        data: {
+          summary: {
+            total: Number(row.total || 0),
+            active: Number(row.active || 0),
+            onsite: Number(row.onsite || 0),
+            offsite: Number(row.offsite || 0),
+            in_warranty: Number(row.in_warranty || 0),
+          },
+        },
+      })
+    }
+
     const detailId = normalizeId(searchParams.get("id"))
 
     if (detailId) {
@@ -931,25 +754,30 @@ export async function GET(request) {
 
       return NextResponse.json({
         success: true,
-        data: { mesin: item },
+        data: {
+          mesin: item,
+          version: {
+            row_version: normalizeRowVersionToken(
+              item.row_version || item.row_version_hex
+            ),
+          },
+        },
       })
     }
 
-    const page = normalizePositiveInteger(searchParams.get("page"), 1)
     const pageSize = normalizePositiveInteger(
       searchParams.get("page_size"),
       DEFAULT_PAGE_SIZE,
       MAXIMUM_PAGE_SIZE
     )
-    const offset = (page - 1) * pageSize
-    const search = normalizeText(searchParams.get("search"))
+    const fetchLimit = pageSize + 1
+    const afterId = normalizeId(searchParams.get("after_id"))
+    const searchPatterns = createSearchPatterns(searchParams.get("search"))
     const activeFilter = parseActiveFilter(searchParams.get("is_active"))
     const cabangId = normalizeId(searchParams.get("cabang_id"))
     const projectId = normalizeId(searchParams.get("project_id"))
     const tipeMesinId = normalizeId(searchParams.get("tipe_mesin_id"))
-    const kategoriMesin = normalizeUpperText(
-      searchParams.get("kategori_mesin")
-    )
+    const kategoriMesin = normalizeUpperText(searchParams.get("kategori_mesin"))
     const kategoriLokasi = normalizeUpperText(
       searchParams.get("kategori_lokasi") ?? searchParams.get("kategori")
     )
@@ -958,212 +786,145 @@ export async function GET(request) {
 
     const listRequest = db
       .request()
-      .input("offset", sql.Int, offset)
-      .input("pageSize", sql.Int, pageSize)
-    const countRequest = db.request()
-    const whereParts = []
+      .input("fetchLimit", sql.Int, fetchLimit)
+      .input("afterId", sql.BigInt, afterId)
+    const whereParts = ["(@afterId IS NULL OR ms.id < @afterId)"]
 
     if (scope.codeUker) {
       listRequest.input("scopeCodeUker", sql.NVarChar(20), scope.codeUker)
-      countRequest.input("scopeCodeUker", sql.NVarChar(20), scope.codeUker)
       whereParts.push("mu.codeuker = @scopeCodeUker")
     }
 
-    if (search) {
-      const wildcard = `%${search}%`
-      listRequest.input("search", sql.NVarChar(500), wildcard)
-      countRequest.input("search", sql.NVarChar(500), wildcard)
+    if (searchPatterns.normalized) {
+      listRequest
+        .input("searchExact", sql.NVarChar(100), searchPatterns.exact)
+        .input("searchPrefix", sql.NVarChar(202), searchPatterns.prefix)
+        .input("searchContains", sql.NVarChar(202), searchPatterns.contains)
       whereParts.push(`(
-        ${schema.tidEnabled ? "ms.tid LIKE @search OR" : ""}
-        ms.sn LIKE @search
-        OR ms.db LIKE @search
-        OR ms.lokasi LIKE @search
-        OR c.kode_cabang LIKE @search
-        OR c.nama_cabang LIKE @search
-        OR k.kode_kanwil LIKE @search
-        OR k.nama_kanwil LIKE @search
-        OR p.kode_project LIKE @search
-        OR p.nama_project LIKE @search
-        OR tm.jenis_mesin LIKE @search
-        OR tm.nama_model LIKE @search
-        OR mk.kode_merk LIKE @search
-        OR mk.nama_merk LIKE @search
-        OR ms.kategori_mesin LIKE @search
-        OR ms.kategori_lokasi LIKE @search
+        ${schema.tidEnabled ? "ms.tid = @searchExact OR ms.tid LIKE @searchPrefix ESCAPE '\\' OR" : ""}
+        ms.sn = @searchExact
+        OR ms.sn LIKE @searchPrefix ESCAPE '\\'
+        OR ms.db LIKE @searchContains ESCAPE '\\'
+        OR ms.lokasi LIKE @searchContains ESCAPE '\\'
+        OR c.kode_cabang LIKE @searchContains ESCAPE '\\'
+        OR c.nama_cabang LIKE @searchContains ESCAPE '\\'
+        OR k.kode_kanwil LIKE @searchContains ESCAPE '\\'
+        OR k.nama_kanwil LIKE @searchContains ESCAPE '\\'
+        OR p.kode_project LIKE @searchContains ESCAPE '\\'
+        OR p.nama_project LIKE @searchContains ESCAPE '\\'
+        OR tm.jenis_mesin LIKE @searchContains ESCAPE '\\'
+        OR tm.nama_model LIKE @searchContains ESCAPE '\\'
+        OR mk.kode_merk LIKE @searchContains ESCAPE '\\'
+        OR mk.nama_merk LIKE @searchContains ESCAPE '\\'
+        OR ms.kategori_mesin LIKE @searchContains ESCAPE '\\'
+        OR ms.kategori_lokasi LIKE @searchContains ESCAPE '\\'
       )`)
     }
 
+    const addFilter = (name, type, value, clause) => {
+      if (value === null || value === undefined || value === "") return
+      listRequest.input(name, type, value)
+      whereParts.push(clause)
+    }
+
     if (activeFilter !== null) {
-      listRequest.input("isActive", sql.Bit, activeFilter)
-      countRequest.input("isActive", sql.Bit, activeFilter)
-      whereParts.push("ms.is_active = @isActive")
+      addFilter("isActive", sql.Bit, activeFilter, "ms.is_active = @isActive")
     }
-
-    if (cabangId) {
-      listRequest.input("cabangId", sql.Int, cabangId)
-      countRequest.input("cabangId", sql.Int, cabangId)
-      whereParts.push("ms.cabang_id = @cabangId")
-    }
-
-    if (projectId) {
-      listRequest.input("projectId", sql.BigInt, projectId)
-      countRequest.input("projectId", sql.BigInt, projectId)
-      whereParts.push("ms.project_id = @projectId")
-    }
-
-    if (tipeMesinId) {
-      listRequest.input("tipeMesinId", sql.Int, tipeMesinId)
-      countRequest.input("tipeMesinId", sql.Int, tipeMesinId)
-      whereParts.push("ms.tipe_mesin_id = @tipeMesinId")
-    }
-
-    if (kategoriMesin) {
-      listRequest.input("kategoriMesin", sql.NVarChar(100), kategoriMesin)
-      countRequest.input("kategoriMesin", sql.NVarChar(100), kategoriMesin)
-      whereParts.push("ms.kategori_mesin = @kategoriMesin")
-    }
+    addFilter("cabangId", sql.Int, cabangId, "ms.cabang_id = @cabangId")
+    addFilter("projectId", sql.BigInt, projectId, "ms.project_id = @projectId")
+    addFilter("tipeMesinId", sql.Int, tipeMesinId, "ms.tipe_mesin_id = @tipeMesinId")
+    addFilter(
+      "kategoriMesin",
+      sql.NVarChar(100),
+      kategoriMesin,
+      "ms.kategori_mesin = @kategoriMesin"
+    )
 
     if (LOCATION_CATEGORY_VALUES.has(kategoriLokasi)) {
-      listRequest.input("kategoriLokasi", sql.NVarChar(50), kategoriLokasi)
-      countRequest.input("kategoriLokasi", sql.NVarChar(50), kategoriLokasi)
-      whereParts.push("ms.kategori_lokasi = @kategoriLokasi")
+      addFilter(
+        "kategoriLokasi",
+        sql.NVarChar(50),
+        kategoriLokasi,
+        "ms.kategori_lokasi = @kategoriLokasi"
+      )
     }
-
     if (SITE_VALUES.has(site)) {
-      listRequest.input("site", sql.VarChar(10), site)
-      countRequest.input("site", sql.VarChar(10), site)
-      whereParts.push("ms.site = @site")
+      addFilter("site", sql.VarChar(10), site, "ms.site = @site")
     }
-
-
     if (WARRANTY_VALUES.has(garansi)) {
-      listRequest.input("garansi", sql.VarChar(20), garansi)
-      countRequest.input("garansi", sql.VarChar(20), garansi)
-      whereParts.push("ms.garansi = @garansi")
+      addFilter("garansi", sql.VarChar(20), garansi, "ms.garansi = @garansi")
     }
 
-    const whereClause =
-      whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : ""
+    const whereClause = `WHERE ${whereParts.join(" AND ")}`
     const tidSelect = schema.tidEnabled
       ? "ms.tid"
       : "CAST(NULL AS VARCHAR(50)) AS tid"
 
-    const [listResult, countResult, summaryResult] = await Promise.all([
-      listRequest.query(`
-        SELECT
-          ms.id,
-          ${tidSelect},
-          ms.sn,
-          ms.db,
-          ms.cabang_id,
-          c.kode_cabang,
-          c.nama_cabang,
-          k.kode_kanwil,
-          k.nama_kanwil,
-          ms.project_id,
-          p.kode_project,
-          p.nama_project,
-          ms.lokasi,
-          ms.site,
-          ms.tipe_mesin_id,
-          tm.jenis_mesin,
-          tm.nama_model,
-          mk.kode_merk,
-          mk.nama_merk,
-          ms.kategori_mesin,
-          ms.kategori_lokasi,
-          ms.garansi,
-          ms.hari_ops,
-          ms.jam_ops,
-          ms.waktu_ops,
-          ms.longitude,
-          ms.latitude,
-          ms.is_active,
-          ms.created_at,
-          ms.updated_at
-        FROM dbo.master_mesin ms
-        LEFT JOIN dbo.master_cabang c
-          ON c.id = ms.cabang_id
-        LEFT JOIN dbo.master_kanwil k
-          ON k.id = c.kanwil_id
-        LEFT JOIN dbo.master_project p
-          ON p.id = ms.project_id
-        LEFT JOIN dbo.master_uker mu
-          ON mu.id = p.uker_id
-        LEFT JOIN dbo.master_tipe_mesin tm
-          ON tm.id = ms.tipe_mesin_id
-        LEFT JOIN dbo.master_merk mk
-          ON mk.id = tm.merk_id
-        ${whereClause}
-        ORDER BY ms.id DESC
-        OFFSET @offset ROWS
-        FETCH NEXT @pageSize ROWS ONLY;
-      `),
-      countRequest.query(`
-        SELECT COUNT_BIG(1) AS total
-        FROM dbo.master_mesin ms
-        LEFT JOIN dbo.master_cabang c
-          ON c.id = ms.cabang_id
-        LEFT JOIN dbo.master_kanwil k
-          ON k.id = c.kanwil_id
-        LEFT JOIN dbo.master_project p
-          ON p.id = ms.project_id
-        LEFT JOIN dbo.master_uker mu
-          ON mu.id = p.uker_id
-        LEFT JOIN dbo.master_tipe_mesin tm
-          ON tm.id = ms.tipe_mesin_id
-        LEFT JOIN dbo.master_merk mk
-          ON mk.id = tm.merk_id
-        ${whereClause};
-      `),
-      db
-        .request()
-        .input("scopeCodeUker", sql.NVarChar(20), scope.codeUker)
-        .query(`
-          SELECT
-            COUNT_BIG(1) AS total,
-            SUM(CASE WHEN ms.is_active = 1 THEN 1 ELSE 0 END) AS active,
-            SUM(CASE WHEN ms.site = 'ONSITE' THEN 1 ELSE 0 END) AS onsite,
-            SUM(CASE WHEN ms.site = 'OFFSITE' THEN 1 ELSE 0 END) AS offsite,
-            SUM(CASE WHEN ms.garansi = 'IN WARRANTY' THEN 1 ELSE 0 END) AS in_warranty
-          FROM dbo.master_mesin ms
-          LEFT JOIN dbo.master_project p
-            ON p.id = ms.project_id
-          LEFT JOIN dbo.master_uker mu
-            ON mu.id = p.uker_id
-          WHERE @scopeCodeUker IS NULL OR mu.codeuker = @scopeCodeUker;
-        `),
-    ])
+    const listResult = await listRequest.query(`
+      SELECT TOP (@fetchLimit)
+        ms.id,
+        ${tidSelect},
+        ms.sn,
+        ms.db,
+        ms.cabang_id,
+        c.kode_cabang,
+        c.nama_cabang,
+        k.kode_kanwil,
+        k.nama_kanwil,
+        ms.project_id,
+        p.kode_project,
+        p.nama_project,
+        ms.lokasi,
+        ms.site,
+        ms.tipe_mesin_id,
+        tm.jenis_mesin,
+        tm.nama_model,
+        mk.kode_merk,
+        mk.nama_merk,
+        ms.kategori_mesin,
+        ms.kategori_lokasi,
+        ms.garansi,
+        ms.hari_ops,
+        ms.jam_ops,
+        ms.waktu_ops,
+        ms.longitude,
+        ms.latitude,
+        ms.is_active,
+        ms.created_at,
+        ms.updated_at,
+        CONVERT(VARCHAR(18), CONVERT(VARBINARY(8), ms.row_version), 1) AS row_version,
+        CONVERT(VARCHAR(18), CONVERT(VARBINARY(8), ms.row_version), 1) AS row_version_hex
+      FROM dbo.master_mesin ms
+      INNER JOIN dbo.master_cabang c ON c.id = ms.cabang_id
+      INNER JOIN dbo.master_kanwil k ON k.id = c.kanwil_id
+      INNER JOIN dbo.master_project p ON p.id = ms.project_id
+      INNER JOIN dbo.master_uker mu ON mu.id = p.uker_id
+      INNER JOIN dbo.master_tipe_mesin tm ON tm.id = ms.tipe_mesin_id
+      INNER JOIN dbo.master_merk mk ON mk.id = tm.merk_id
+      ${whereClause}
+      ORDER BY ms.id DESC;
+    `)
 
-    const total = Number(countResult.recordset[0]?.total || 0)
-    const summary = summaryResult.recordset[0] || {}
+    const hasMore = listResult.recordset.length > pageSize
+    const mesins = listResult.recordset.slice(0, pageSize)
+    const lastItem = mesins.at(-1)
 
     return NextResponse.json({
       success: true,
       data: {
-        mesins: listResult.recordset,
+        mesins,
         pagination: {
-          page,
           page_size: pageSize,
-          total,
-          total_pages: Math.max(1, Math.ceil(total / pageSize)),
+          has_more: hasMore,
+          next_cursor: hasMore && lastItem ? String(lastItem.id) : null,
         },
-        summary: {
-          total: Number(summary.total || 0),
-          active: Number(summary.active || 0),
-          onsite: Number(summary.onsite || 0),
-          offsite: Number(summary.offsite || 0),
-          in_warranty: Number(summary.in_warranty || 0),
-        },
-        schema: {
-          tid_enabled: schema.tidEnabled,
-        },
+        schema: { tid_enabled: schema.tidEnabled },
         notice: !schema.tidEnabled
-          ? "Kolom TID belum tersedia di database. Data lama tetap ditampilkan, tetapi migration 011 harus dijalankan sebelum menambah atau mengubah Mesin."
-          : Number(summary.total || 0) === 0 && scope.codeUker
-            ? `Belum ada data Mesin yang terhubung ke Project unit kerja ${scope.codeUker}.`
-            : Number(summary.total || 0) === 0
-              ? "Tabel master_mesin belum memiliki data."
+          ? "Kolom TID belum tersedia di database. Jalankan migration 011 sebelum menambah atau mengubah Mesin."
+          : mesins.length === 0 && scope.codeUker
+            ? `Tidak ada data Mesin pada halaman ini untuk unit kerja ${scope.codeUker}.`
+            : mesins.length === 0
+              ? "Tidak ada data Mesin yang sesuai filter."
               : "",
       },
     })
@@ -1174,7 +935,7 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "create")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -1197,7 +958,7 @@ export async function POST(request) {
       return createErrorResponse("Format permintaan tidak valid.")
     }
 
-    const validation = validatePayload(body)
+    const validation = validateMachinePayload(body)
 
     if (validation.error) {
       return createErrorResponse(validation.error)
@@ -1296,6 +1057,16 @@ export async function POST(request) {
     const createdId = Number(result.recordset[0]?.id)
     const createdItem = await getById(db, createdId, scope.codeUker, schema)
 
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "CREATE",
+      module: "masters.mesin",
+      entityType: "master_mesin",
+      entityId: createdId,
+      metadata: { tid: data.tid, sn: data.sn },
+    })
+
     return NextResponse.json(
       {
         success: true,
@@ -1312,6 +1083,26 @@ export async function POST(request) {
       return createErrorResponse("TID atau SN sudah digunakan oleh mesin lain.", 409)
     }
 
+    if (
+      sqlErrorNumber === 547 &&
+      /CK_master_mesin_kategori_lokasi/i.test(getServerErrorMessage(error))
+    ) {
+      return createErrorResponse(
+        "Kategori Lokasi belum diizinkan oleh database. Jalankan npm run db:migrate untuk menerapkan migration 020-sync-master-mesin-location-categories.sql.",
+        409
+      )
+    }
+
+    if (
+      sqlErrorNumber === 547 &&
+      /CK_master_mesin_waktu_ops/i.test(getServerErrorMessage(error))
+    ) {
+      return createErrorResponse(
+        "Waktu Operasional belum diizinkan oleh database. Jalankan npm run db:migrate untuk menerapkan migration 021-sync-master-mesin-operation-times.sql.",
+        409
+      )
+    }
+
     if (sqlErrorNumber === 547) {
       return createErrorResponse(
         "Cabang, Project, atau Tipe Mesin yang dipilih tidak valid.",
@@ -1324,7 +1115,7 @@ export async function POST(request) {
 }
 
 export async function PUT(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "update")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -1353,7 +1144,10 @@ export async function PUT(request) {
       return createErrorResponse("ID Mesin tidak valid.")
     }
 
-    const validation = validatePayload(body)
+    const requestedRowVersion = normalizeRowVersionToken(body?.row_version)
+    const requestedUpdatedAt = normalizeDateSecond(body?.updated_at)
+
+    const validation = validateMachinePayload(body)
 
     if (validation.error) {
       return createErrorResponse(validation.error)
@@ -1375,6 +1169,35 @@ export async function PUT(request) {
       return createErrorResponse("Data Mesin tidak ditemukan.", 404)
     }
 
+    const existingRowVersion = normalizeRowVersionToken(
+      existingItem.row_version || existingItem.row_version_hex
+    )
+    let rowVersion = requestedRowVersion
+
+    if (!rowVersion) {
+      const existingUpdatedAt = normalizeDateSecond(existingItem.updated_at)
+
+      if (
+        requestedUpdatedAt === null ||
+        existingUpdatedAt === null ||
+        requestedUpdatedAt !== existingUpdatedAt
+      ) {
+        return createErrorResponse(
+          "Data Mesin telah berubah atau versi data tidak tersedia. Tutup form, buka kembali data, lalu simpan ulang.",
+          409
+        )
+      }
+
+      rowVersion = existingRowVersion
+    }
+
+    if (!rowVersion) {
+      return createErrorResponse(
+        "Token versi data Mesin tidak tersedia pada server. Periksa kolom row_version pada dbo.master_mesin.",
+        500
+      )
+    }
+
     const data = validation.data
     const referenceError = await validateReferences(db, data, scope.codeUker)
 
@@ -1390,9 +1213,10 @@ export async function PUT(request) {
       return createErrorResponse("SN sudah digunakan oleh mesin lain.", 409)
     }
 
-    await db
+    const updateResult = await db
       .request()
       .input("id", sql.BigInt, id)
+      .input("rowVersion", sql.VarBinary(8), Buffer.from(rowVersion.slice(2), "hex"))
       .input("scopeCodeUker", sql.NVarChar(20), scope.codeUker)
       .input("tid", sql.VarChar(50), data.tid)
       .input("sn", sql.VarChar(100), data.sn)
@@ -1433,6 +1257,7 @@ export async function PUT(request) {
           is_active = @isActive,
           updated_at = SYSDATETIME()
         WHERE id = @id
+          AND row_version = @rowVersion
           AND (
             @scopeCodeUker IS NULL
             OR EXISTS (
@@ -1446,7 +1271,24 @@ export async function PUT(request) {
           );
       `)
 
+    if (Number(updateResult.rowsAffected?.[0] || 0) === 0) {
+      return createErrorResponse(
+        "Data telah berubah oleh pengguna lain. Muat ulang data sebelum menyimpan.",
+        409
+      )
+    }
+
     const updatedItem = await getById(db, id, scope.codeUker, schema)
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "UPDATE",
+      module: "masters.mesin",
+      entityType: "master_mesin",
+      entityId: id,
+      metadata: { tid: data.tid, sn: data.sn },
+    })
 
     return NextResponse.json({
       success: true,
@@ -1461,6 +1303,26 @@ export async function PUT(request) {
       return createErrorResponse("TID atau SN sudah digunakan oleh mesin lain.", 409)
     }
 
+    if (
+      sqlErrorNumber === 547 &&
+      /CK_master_mesin_kategori_lokasi/i.test(getServerErrorMessage(error))
+    ) {
+      return createErrorResponse(
+        "Kategori Lokasi belum diizinkan oleh database. Jalankan npm run db:migrate untuk menerapkan migration 020-sync-master-mesin-location-categories.sql.",
+        409
+      )
+    }
+
+    if (
+      sqlErrorNumber === 547 &&
+      /CK_master_mesin_waktu_ops/i.test(getServerErrorMessage(error))
+    ) {
+      return createErrorResponse(
+        "Waktu Operasional belum diizinkan oleh database. Jalankan npm run db:migrate untuk menerapkan migration 021-sync-master-mesin-operation-times.sql.",
+        409
+      )
+    }
+
     if (sqlErrorNumber === 547) {
       return createErrorResponse(
         "Cabang, Project, atau Tipe Mesin yang dipilih tidak valid.",
@@ -1473,7 +1335,7 @@ export async function PUT(request) {
 }
 
 export async function DELETE(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "delete")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -1529,6 +1391,16 @@ export async function DELETE(request) {
             )
           );
       `)
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "DELETE",
+      module: "masters.mesin",
+      entityType: "master_mesin",
+      entityId: id,
+      metadata: { tid: existingItem.tid, sn: existingItem.sn },
+    })
 
     return NextResponse.json({
       success: true,

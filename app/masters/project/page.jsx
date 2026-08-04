@@ -3,6 +3,7 @@
 import Link from "next/link"
 import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
+import { useAppBootstrap } from "@/components/app-bootstrap-context"
 
 const PROJECT_STATUSES = [
   { value: "PERENCANAAN", label: "Perencanaan" },
@@ -26,6 +27,7 @@ const EMPTY_PROJECT_FORM = {
   progress: "0",
   keterangan: "",
   is_active: true,
+  row_version: "",
 }
 
 function mapProjectToForm(project) {
@@ -50,6 +52,7 @@ function mapProjectToForm(project) {
     progress: String(project?.progress ?? 0),
     keterangan: String(project?.keterangan || ""),
     is_active: Boolean(project?.is_active),
+    row_version: String(project?.row_version || ""),
   }
 }
 
@@ -143,11 +146,11 @@ function routeAuthorizationError(error, router) {
 
 export default function MasterProjectPage() {
   const router = useRouter()
+  const { user: currentUser } = useAppBootstrap()
   const toastTimerRef = useRef(null)
 
   const [projects, setProjects] = useState([])
   const [ukers, setUkers] = useState([])
-  const [currentUser, setCurrentUser] = useState(null)
   const [scope, setScope] = useState(null)
   const [summary, setSummary] = useState({
     total: 0,
@@ -219,23 +222,16 @@ export default function MasterProjectPage() {
   useEffect(() => {
     const controller = new AbortController()
 
-    Promise.all([
-      requestJson("/api/masters/uker", {
-        method: "GET",
-        signal: controller.signal,
-      }),
-      requestJson("/api/auth/me", {
-        method: "GET",
-        signal: controller.signal,
-      }),
-    ])
-      .then(([ukerResult, userResult]) => {
+    requestJson("/api/masters/uker?mode=options", {
+      method: "GET",
+      signal: controller.signal,
+    })
+      .then((ukerResult) => {
         if (controller.signal.aborted) return
 
         setUkers(
           Array.isArray(ukerResult.data?.ukers) ? ukerResult.data.ukers : []
         )
-        setCurrentUser(userResult.data || null)
       })
       .catch((error) => {
         if (error?.name === "AbortError" || controller.signal.aborted) return
@@ -243,7 +239,7 @@ export default function MasterProjectPage() {
 
         console.error("Gagal memuat referensi master project:", error)
         setLoadError(
-          getErrorMessage(error, "Gagal mengambil data unit kerja dan pengguna.")
+          getErrorMessage(error, "Gagal mengambil data unit kerja.")
         )
       })
       .finally(() => {
@@ -266,8 +262,12 @@ export default function MasterProjectPage() {
     if (activeFilter === "ACTIVE") query.set("is_active", "true")
     if (activeFilter === "INACTIVE") query.set("is_active", "false")
 
-    setLoadingProjects(true)
-    setLoadError("")
+    queueMicrotask(() => {
+      if (controller.signal.aborted) return
+
+      setLoadingProjects(true)
+      setLoadError("")
+    })
 
     requestJson(`/api/masters/project?${query.toString()}`, {
       method: "GET",
@@ -453,6 +453,7 @@ export default function MasterProjectPage() {
       progress: progressValue,
       keterangan: form.keterangan.trim(),
       is_active: form.is_active,
+      row_version: form.row_version,
     }
 
     if (editingId) payload.id = editingId

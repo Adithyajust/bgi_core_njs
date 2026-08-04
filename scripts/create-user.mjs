@@ -9,6 +9,8 @@ dotenv.config({
   path: ".env.local",
 })
 
+const isProduction = process.env.NODE_ENV === "production"
+
 const databaseConfig = {
   user: process.env.MSSQL_USER,
   password: process.env.MSSQL_PASSWORD,
@@ -20,13 +22,14 @@ const databaseConfig = {
 
   options: {
     encrypt:
-      process.env.MSSQL_ENCRYPT ===
-      "true",
+      process.env.MSSQL_ENCRYPT === undefined
+        ? isProduction
+        : process.env.MSSQL_ENCRYPT === "true",
 
     trustServerCertificate:
-      process.env
-        .MSSQL_TRUST_SERVER_CERTIFICATE !==
-      "false",
+      process.env.MSSQL_TRUST_SERVER_CERTIFICATE === undefined
+        ? !isProduction
+        : process.env.MSSQL_TRUST_SERVER_CERTIFICATE === "true",
   },
 
   pool: {

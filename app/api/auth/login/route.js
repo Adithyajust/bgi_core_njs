@@ -7,6 +7,12 @@ import {
   SESSION_COOKIE_NAME,
   SESSION_MAX_AGE,
 } from "@/lib/auth"
+import {
+  consumeRateLimit,
+  rateLimitResponse,
+  validateSameOrigin,
+} from "@/lib/security/request-security"
+import { writeAuditLog } from "@/lib/security/audit-log"
 
 export const runtime = "nodejs"
 
@@ -25,6 +31,12 @@ function normalizeUsername(value) {
 
 export async function POST(request) {
   try {
+    const originResponse = validateSameOrigin(request)
+
+    if (originResponse) {
+      return originResponse
+    }
+
     let body
 
     try {
@@ -61,6 +73,61 @@ export async function POST(request) {
           status: 400,
         }
       )
+    }
+
+
+    const windowSeconds = Number(
+      process.env.LOGIN_RATE_WINDOW_SECONDS || 900
+    )
+    const ipRateLimit = await consumeRateLimit({
+      request,
+      namespace: "auth.login.ip",
+      limit: Number(process.env.LOGIN_IP_RATE_LIMIT || 50),
+      windowSeconds,
+    })
+
+    if (!ipRateLimit.allowed) {
+      await writeAuditLog({
+        request,
+        action: "LOGIN_THROTTLED",
+        module: "auth.login",
+        entityType: "user",
+        entityId: username || null,
+        metadata: {
+          username: username || null,
+          reason: "IP_RATE_LIMIT",
+          retry_after_seconds: ipRateLimit.retryAfterSeconds || null,
+          user_agent: request.headers.get("user-agent")?.slice(0, 500) || null,
+        },
+      })
+
+      return rateLimitResponse(ipRateLimit)
+    }
+
+    const accountRateLimit = await consumeRateLimit({
+      request,
+      namespace: "auth.login.account",
+      identifier: username,
+      limit: Number(process.env.LOGIN_RATE_LIMIT || 10),
+      windowSeconds,
+    })
+
+    if (!accountRateLimit.allowed) {
+      await writeAuditLog({
+        request,
+        action: "LOGIN_THROTTLED",
+        module: "auth.login",
+        entityType: "user",
+        entityId: username,
+        metadata: {
+          username,
+          reason: "ACCOUNT_RATE_LIMIT",
+          retry_after_seconds: accountRateLimit.retryAfterSeconds || null,
+          user_agent: request.headers.get("user-agent")?.slice(0, 500) || null,
+        },
+      })
+
+      return rateLimitResponse(accountRateLimit)
     }
 
     const db = await connectDB()
@@ -123,6 +190,19 @@ export async function POST(request) {
       `)
 
     if (userResult.recordset.length === 0) {
+      await writeAuditLog({
+        request,
+        action: "LOGIN_FAILED",
+        module: "auth.login",
+        entityType: "user",
+        entityId: username,
+        metadata: {
+          username,
+          reason: "UNKNOWN_USERNAME",
+          user_agent: request.headers.get("user-agent")?.slice(0, 500) || null,
+        },
+      })
+
       return NextResponse.json(
         {
           success: false,
@@ -141,6 +221,22 @@ export async function POST(request) {
       !user.is_active ||
       !user.role_is_active
     ) {
+      await writeAuditLog({
+        request,
+        userId: user.id,
+        action: "LOGIN_DENIED",
+        module: "auth.login",
+        entityType: "user",
+        entityId: user.id,
+        metadata: {
+          username: user.username,
+          reason: !user.is_active ? "USER_INACTIVE" : "ROLE_INACTIVE",
+          role_code: user.role_code,
+          codeuker: user.codeuker,
+          user_agent: request.headers.get("user-agent")?.slice(0, 500) || null,
+        },
+      })
+
       return NextResponse.json(
         {
           success: false,
@@ -158,6 +254,23 @@ export async function POST(request) {
       new Date(user.locked_until) >
         new Date()
     ) {
+      await writeAuditLog({
+        request,
+        userId: user.id,
+        action: "LOGIN_DENIED",
+        module: "auth.login",
+        entityType: "user",
+        entityId: user.id,
+        metadata: {
+          username: user.username,
+          reason: "ACCOUNT_LOCKED",
+          locked_until: user.locked_until,
+          role_code: user.role_code,
+          codeuker: user.codeuker,
+          user_agent: request.headers.get("user-agent")?.slice(0, 500) || null,
+        },
+      })
+
       return NextResponse.json(
         {
           success: false,
@@ -179,6 +292,9 @@ export async function POST(request) {
       )
 
     if (!passwordValid) {
+      const failedAttemptNumber = Number(user.failed_login_count || 0) + 1
+      const accountWillBeLocked = failedAttemptNumber >= MAX_LOGIN_ATTEMPTS
+
       await db
         .request()
         .input(
@@ -224,6 +340,27 @@ export async function POST(request) {
           WHERE id = @userId;
         `)
 
+      await writeAuditLog({
+        request,
+        userId: user.id,
+        action: "LOGIN_FAILED",
+        module: "auth.login",
+        entityType: "user",
+        entityId: user.id,
+        metadata: {
+          username: user.username,
+          reason: "INVALID_PASSWORD",
+          failed_attempt_number: failedAttemptNumber,
+          account_locked: accountWillBeLocked,
+          lock_duration_minutes: accountWillBeLocked
+            ? LOCK_DURATION_MINUTES
+            : null,
+          role_code: user.role_code,
+          codeuker: user.codeuker,
+          user_agent: request.headers.get("user-agent")?.slice(0, 500) || null,
+        },
+      })
+
       return NextResponse.json(
         {
           success: false,
@@ -260,6 +397,25 @@ export async function POST(request) {
         user.id,
         request
       )
+
+    await writeAuditLog({
+      request,
+      userId: user.id,
+      action: "LOGIN_SUCCESS",
+      module: "auth.login",
+      entityType: "user",
+      entityId: user.id,
+      metadata: {
+        username: user.username,
+        role_code: user.role_code,
+        role_name: user.role_name,
+        codeuker: user.codeuker,
+        uker_name: user.uker_name,
+        must_change_password: Boolean(user.must_change_password),
+        session_expires_at: session.expiresAt,
+        user_agent: request.headers.get("user-agent")?.slice(0, 500) || null,
+      },
+    })
 
     const response =
       NextResponse.json({

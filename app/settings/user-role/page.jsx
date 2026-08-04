@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 
 const EMPTY_USER_FORM = {
@@ -14,6 +14,7 @@ const EMPTY_USER_FORM = {
   role_id: "",
   codeuker: "",
   is_active: true,
+  row_version: "",
 }
 
 const EMPTY_PASSWORD_FORM = {
@@ -50,8 +51,24 @@ async function readJsonResponse(response) {
   return response.json()
 }
 
-async function fetchUserRoleData(signal) {
-  const response = await fetch("/api/settings/user-role", {
+async function fetchUserRoleData({
+  signal,
+  page,
+  pageSize,
+  search,
+  roleFilter,
+  statusFilter,
+}) {
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  })
+
+  if (search) params.set("search", search)
+  if (roleFilter !== "ALL") params.set("role", roleFilter)
+  if (statusFilter !== "ALL") params.set("status", statusFilter)
+
+  const response = await fetch(`/api/settings/user-role?${params.toString()}`, {
     method: "GET",
     credentials: "include",
     cache: "no-store",
@@ -69,15 +86,45 @@ async function fetchUserRoleData(signal) {
   return result.data
 }
 
+async function fetchPegawaiOptions({ signal, search = "", selectedUserId = null }) {
+  const params = new URLSearchParams({ mode: "pegawai-options", limit: "100" })
+  if (search) params.set("search", search)
+  if (selectedUserId) params.set("selected_user_id", String(selectedUserId))
+
+  const response = await fetch(`/api/settings/user-role?${params.toString()}`, {
+    method: "GET",
+    credentials: "include",
+    cache: "no-store",
+    signal,
+  })
+  const result = await readJsonResponse(response)
+
+  if (!response.ok || !result.success) {
+    const error = new Error(result.message || "Gagal mengambil opsi pegawai.")
+    error.status = response.status
+    throw error
+  }
+
+  return Array.isArray(result.data?.pegawai) ? result.data.pegawai : []
+}
+
 function getErrorMessage(error, fallbackMessage) {
   return error instanceof Error ? error.message : fallbackMessage
 }
 
 function buildPermissionSelection(permissions, roleId) {
-  return new Set(
+  return new Map(
     permissions
       .filter((permission) => Number(permission.role_id) === Number(roleId))
-      .map((permission) => Number(permission.sidebar_route_id))
+      .map((permission) => [
+        Number(permission.sidebar_route_id),
+        {
+          can_view: Boolean(permission.can_view),
+          can_create: Boolean(permission.can_create),
+          can_update: Boolean(permission.can_update),
+          can_delete: Boolean(permission.can_delete),
+        },
+      ])
   )
 }
 
@@ -102,6 +149,23 @@ export default function UserRoleMaintenancePage() {
   const [searchText, setSearchText] = useState("")
   const [roleFilter, setRoleFilter] = useState("ALL")
   const [statusFilter, setStatusFilter] = useState("ALL")
+  const [currentPage, setCurrentPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
+  const [debouncedSearchText, setDebouncedSearchText] = useState("")
+  const [pagination, setPagination] = useState({
+    page: 1,
+    page_size: 20,
+    total: 0,
+    total_pages: 1,
+  })
+  const [summary, setSummary] = useState({
+    total: 0,
+    active: 0,
+    locked: 0,
+    roleCount: 0,
+  })
+  const [pegawaiSearch, setPegawaiSearch] = useState("")
+  const [pegawaiLoading, setPegawaiLoading] = useState(false)
 
   const [userModalOpen, setUserModalOpen] = useState(false)
   const [userForm, setUserForm] = useState(EMPTY_USER_FORM)
@@ -116,7 +180,8 @@ export default function UserRoleMaintenancePage() {
   const [deleteUserError, setDeleteUserError] = useState("")
 
   const [selectedRoleId, setSelectedRoleId] = useState("")
-  const [permissionSelection, setPermissionSelection] = useState(new Set())
+  const selectedRoleIdRef = useRef("")
+  const [permissionSelection, setPermissionSelection] = useState(new Map())
 
   const [toast, setToast] = useState({
     open: false,
@@ -146,7 +211,7 @@ export default function UserRoleMaintenancePage() {
     }, type === "error" ? 5000 : 3500)
   }
 
-  function applyLoadedData(loadedData) {
+  const applyLoadedData = useCallback((loadedData) => {
     const normalizedData = {
       currentUserId: loadedData.currentUserId,
       users: Array.isArray(loadedData.users) ? loadedData.users : [],
@@ -155,42 +220,70 @@ export default function UserRoleMaintenancePage() {
       permissions: Array.isArray(loadedData.permissions)
         ? loadedData.permissions
         : [],
-      pegawai: Array.isArray(loadedData.pegawai) ? loadedData.pegawai : [],
     }
 
-    setData(normalizedData)
+    setData((currentData) => ({
+      ...normalizedData,
+      pegawai: currentData.pegawai,
+    }))
+    const nextPagination = loadedData.pagination || {
+      page: currentPage,
+      page_size: pageSize,
+      total: 0,
+      total_pages: 1,
+    }
+    setPagination(nextPagination)
+    if (currentPage > Number(nextPagination.total_pages || 1)) {
+      setCurrentPage(Math.max(1, Number(nextPagination.total_pages || 1)))
+    }
+    setSummary(
+      loadedData.summary || {
+        total: 0,
+        active: 0,
+        locked: 0,
+        roleCount: normalizedData.roles.length,
+      }
+    )
 
     const nextRoleId =
-      selectedRoleId ||
-      String(normalizedData.roles.find((role) => role.role_code !== "SUPER_ADMIN")?.id || normalizedData.roles[0]?.id || "")
+      selectedRoleIdRef.current ||
+      String(
+        normalizedData.roles.find((role) => role.role_code !== "SUPER_ADMIN")?.id ||
+          normalizedData.roles[0]?.id ||
+          ""
+      )
 
+    selectedRoleIdRef.current = nextRoleId
     setSelectedRoleId(nextRoleId)
     setPermissionSelection(
       buildPermissionSelection(normalizedData.permissions, nextRoleId)
     )
-  }
+  }, [currentPage, pageSize])
 
   async function reloadData() {
     try {
       setLoading(true)
       setLoadError("")
 
-      const loadedData = await fetchUserRoleData()
+      const loadedData = await fetchUserRoleData({
+        page: currentPage,
+        pageSize,
+        search: debouncedSearchText,
+        roleFilter,
+        statusFilter,
+      })
       applyLoadedData(loadedData)
       return true
     } catch (error) {
       console.error("Gagal memuat user role:", error)
-
       if (error?.status === 401) {
         router.replace("/login")
         return false
       }
-
       if (error?.status === 403) {
         router.replace("/forbidden")
         return false
       }
-
       const message = getErrorMessage(error, "Gagal mengambil data user role.")
       setLoadError(message)
       showToast("error", message)
@@ -201,65 +294,88 @@ export default function UserRoleMaintenancePage() {
   }
 
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchText(searchText.trim())
+    }, 350)
+    return () => window.clearTimeout(timer)
+  }, [searchText])
+
+  useEffect(() => {
     const controller = new AbortController()
 
-    fetchUserRoleData(controller.signal)
+    fetchUserRoleData({
+      signal: controller.signal,
+      page: currentPage,
+      pageSize,
+      search: debouncedSearchText,
+      roleFilter,
+      statusFilter,
+    })
       .then((loadedData) => {
         if (!controller.signal.aborted) {
-          const normalizedData = {
-            currentUserId: loadedData.currentUserId,
-            users: Array.isArray(loadedData.users) ? loadedData.users : [],
-            roles: Array.isArray(loadedData.roles) ? loadedData.roles : [],
-            menus: Array.isArray(loadedData.menus) ? loadedData.menus : [],
-            permissions: Array.isArray(loadedData.permissions)
-              ? loadedData.permissions
-              : [],
-            pegawai: Array.isArray(loadedData.pegawai) ? loadedData.pegawai : [],
-          }
-
-          setData(normalizedData)
-
-          const initialRoleId = String(
-            normalizedData.roles.find((role) => role.role_code !== "SUPER_ADMIN")?.id ||
-              normalizedData.roles[0]?.id ||
-              ""
-          )
-
-          setSelectedRoleId(initialRoleId)
-          setPermissionSelection(
-            buildPermissionSelection(normalizedData.permissions, initialRoleId)
-          )
+          applyLoadedData(loadedData)
           setLoadError("")
         }
       })
       .catch((error) => {
-        if (controller.signal.aborted || error?.name === "AbortError") {
-          return
-        }
-
+        if (controller.signal.aborted || error?.name === "AbortError") return
         if (error?.status === 401) {
           router.replace("/login")
           return
         }
-
         if (error?.status === 403) {
           router.replace("/forbidden")
           return
         }
-
         console.error("Gagal memuat user role:", error)
         setLoadError(getErrorMessage(error, "Gagal mengambil data user role."))
       })
       .finally(() => {
-        if (!controller.signal.aborted) {
-          setLoading(false)
-        }
+        if (!controller.signal.aborted) setLoading(false)
       })
 
+    return () => controller.abort()
+  }, [
+    applyLoadedData,
+    currentPage,
+    debouncedSearchText,
+    pageSize,
+    roleFilter,
+    router,
+    statusFilter,
+  ])
+
+  useEffect(() => {
+    if (!userModalOpen) return undefined
+
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      setPegawaiLoading(true)
+      fetchPegawaiOptions({
+        signal: controller.signal,
+        search: pegawaiSearch.trim(),
+        selectedUserId: userForm.id,
+      })
+        .then((pegawai) => {
+          if (!controller.signal.aborted) {
+            setData((currentData) => ({ ...currentData, pegawai }))
+          }
+        })
+        .catch((error) => {
+          if (controller.signal.aborted || error?.name === "AbortError") return
+          console.error("Gagal memuat opsi pegawai:", error)
+          setUserModalError(getErrorMessage(error, "Gagal mengambil opsi pegawai."))
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setPegawaiLoading(false)
+        })
+    }, 250)
+
     return () => {
+      window.clearTimeout(timer)
       controller.abort()
     }
-  }, [router])
+  }, [pegawaiSearch, userForm.id, userModalOpen])
 
   useEffect(() => {
     return () => {
@@ -298,44 +414,9 @@ export default function UserRoleMaintenancePage() {
     }
   }, [deleteUserTarget, deletingUser, passwordModalOpen, saving, userModalOpen])
 
-  const filteredUsers = useMemo(() => {
-    const keyword = searchText.trim().toLowerCase()
-
-    return data.users.filter((user) => {
-      const matchesKeyword =
-        !keyword ||
-        user.username?.toLowerCase().includes(keyword) ||
-        user.full_name?.toLowerCase().includes(keyword) ||
-        user.email?.toLowerCase().includes(keyword) ||
-        user.pegawai_nip?.toLowerCase().includes(keyword) ||
-        user.pegawai_nama?.toLowerCase().includes(keyword) ||
-        user.pegawai_jabatan?.toLowerCase().includes(keyword) ||
-        user.role_name?.toLowerCase().includes(keyword) ||
-        user.codeuker?.toLowerCase().includes(keyword) ||
-        user.uker_name?.toLowerCase().includes(keyword) ||
-        user.pegawai_uker_name?.toLowerCase().includes(keyword)
-
-      const matchesRole =
-        roleFilter === "ALL" || user.role_code === roleFilter
-
-      const matchesStatus =
-        statusFilter === "ALL" ||
-        (statusFilter === "ACTIVE" && user.is_active) ||
-        (statusFilter === "INACTIVE" && !user.is_active) ||
-        (statusFilter === "LOCKED" && user.is_locked)
-
-      return matchesKeyword && matchesRole && matchesStatus
-    })
-  }, [data.users, roleFilter, searchText, statusFilter])
-
-  const summary = useMemo(() => {
-    return {
-      total: data.users.length,
-      active: data.users.filter((user) => user.is_active).length,
-      locked: data.users.filter((user) => user.is_locked).length,
-      roleCount: data.roles.length,
-    }
-  }, [data.roles.length, data.users])
+  const filteredUsers = data.users
+  const totalPages = Math.max(1, Number(pagination.total_pages || 1))
+  const activePage = Math.min(currentPage, totalPages)
 
   const selectedRole = data.roles.find(
     (role) => Number(role.id) === Number(selectedRoleId)
@@ -352,17 +433,10 @@ export default function UserRoleMaintenancePage() {
   const requiresPegawai =
     selectedUserFormRole?.role_code !== "SUPER_ADMIN"
 
-  const availablePegawai = data.pegawai.filter((pegawai) => {
-    const isCurrentSelection =
-      Number(pegawai.user_id) === Number(userForm.id)
-
-    return (
-      isCurrentSelection ||
-      (Boolean(pegawai.status) && !pegawai.user_id)
-    )
-  })
+  const availablePegawai = data.pegawai
 
   function openAddUserModal() {
+    setPegawaiSearch("")
     const defaultRole =
       data.roles.find((role) => role.role_code !== "SUPER_ADMIN") ||
       data.roles[0]
@@ -376,6 +450,7 @@ export default function UserRoleMaintenancePage() {
   }
 
   function openEditUserModal(user) {
+    setPegawaiSearch("")
     setUserForm({
       id: user.id,
       username: user.username || "",
@@ -386,6 +461,7 @@ export default function UserRoleMaintenancePage() {
       role_id: String(user.role_id || ""),
       codeuker: user.codeuker || "",
       is_active: Boolean(user.is_active),
+      row_version: user.row_version || "",
     })
     setUserModalError("")
     setUserModalOpen(true)
@@ -547,6 +623,7 @@ export default function UserRoleMaintenancePage() {
         role_id: Number(userForm.role_id),
         codeuker: userForm.codeuker,
         is_active: userForm.is_active,
+        row_version: userForm.row_version,
       }
 
       const response = await fetch("/api/settings/user-role", {
@@ -667,22 +744,43 @@ export default function UserRoleMaintenancePage() {
 
   function handleRoleSelection(event) {
     const roleId = event.target.value
+    selectedRoleIdRef.current = roleId
     setSelectedRoleId(roleId)
     setPermissionSelection(buildPermissionSelection(data.permissions, roleId))
   }
 
-  function togglePermission(menuId) {
+  function togglePermission(menuId, permissionName) {
     if (selectedRole?.role_code === "SUPER_ADMIN") {
       return
     }
 
     setPermissionSelection((currentSelection) => {
-      const nextSelection = new Set(currentSelection)
+      const nextSelection = new Map(currentSelection)
+      const current = nextSelection.get(menuId) || {
+        can_view: false,
+        can_create: false,
+        can_update: false,
+        can_delete: false,
+      }
+      const next = {
+        ...current,
+        [permissionName]: !current[permissionName],
+      }
 
-      if (nextSelection.has(menuId)) {
-        nextSelection.delete(menuId)
+      if (permissionName !== "can_view" && next[permissionName]) {
+        next.can_view = true
+      }
+
+      if (!next.can_view) {
+        next.can_create = false
+        next.can_update = false
+        next.can_delete = false
+      }
+
+      if (next.can_view || next.can_create || next.can_update || next.can_delete) {
+        nextSelection.set(menuId, next)
       } else {
-        nextSelection.add(menuId)
+        nextSelection.delete(menuId)
       }
 
       return nextSelection
@@ -702,7 +800,12 @@ export default function UserRoleMaintenancePage() {
         body: JSON.stringify({
           action: "save_permissions",
           role_id: Number(selectedRoleId),
-          menu_ids: [...permissionSelection],
+          permissions: [...permissionSelection.entries()].map(
+            ([menuId, permission]) => ({
+              menu_id: menuId,
+              ...permission,
+            })
+          ),
         }),
       })
 
@@ -799,13 +902,13 @@ export default function UserRoleMaintenancePage() {
                 <input
                   type="search"
                   value={searchText}
-                  onChange={(event) => setSearchText(event.target.value)}
+                  onChange={(event) => { setSearchText(event.target.value); setCurrentPage(1) }}
                   placeholder="Cari nama, NIP, username, email, atau role..."
                 />
 
                 <select
                   value={roleFilter}
-                  onChange={(event) => setRoleFilter(event.target.value)}
+                  onChange={(event) => { setRoleFilter(event.target.value); setCurrentPage(1) }}
                 >
                   <option value="ALL">Semua role</option>
                   {data.roles.map((role) => (
@@ -817,7 +920,7 @@ export default function UserRoleMaintenancePage() {
 
                 <select
                   value={statusFilter}
-                  onChange={(event) => setStatusFilter(event.target.value)}
+                  onChange={(event) => { setStatusFilter(event.target.value); setCurrentPage(1) }}
                 >
                   <option value="ALL">Semua status</option>
                   <option value="ACTIVE">Aktif</option>
@@ -1002,6 +1105,45 @@ export default function UserRoleMaintenancePage() {
                 </table>
               </div>
             )}
+
+            {!loading ? (
+              <div className="user-role-toolbar" style={{ marginTop: "16px" }}>
+                <div className="user-role-filters">
+                  <select
+                    value={pageSize}
+                    onChange={(event) => {
+                      setPageSize(Number(event.target.value))
+                      setCurrentPage(1)
+                    }}
+                  >
+                    {[10, 20, 50, 100].map((size) => (
+                      <option key={size} value={size}>{size} baris</option>
+                    ))}
+                  </select>
+                  <span>
+                    Halaman {activePage} dari {totalPages} · {pagination.total || 0} user
+                  </span>
+                </div>
+                <div className="user-role-toolbar-actions">
+                  <button
+                    type="button"
+                    className="user-role-button secondary"
+                    onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                    disabled={activePage <= 1}
+                  >
+                    Sebelumnya
+                  </button>
+                  <button
+                    type="button"
+                    className="user-role-button secondary"
+                    onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                    disabled={activePage >= totalPages}
+                  >
+                    Berikutnya
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </>
         ) : (
           <div className="user-role-permission-layout">
@@ -1058,26 +1200,45 @@ export default function UserRoleMaintenancePage() {
 
               <div className="user-role-permission-grid">
                 {data.menus.map((menu) => {
-                  const checked =
-                    selectedRole?.role_code === "SUPER_ADMIN" ||
-                    permissionSelection.has(Number(menu.id))
+                  const menuId = Number(menu.id)
+                  const stored = permissionSelection.get(menuId) || {}
+                  const superAdmin = selectedRole?.role_code === "SUPER_ADMIN"
+                  const permissions = {
+                    can_view: superAdmin || Boolean(stored.can_view),
+                    can_create: superAdmin || Boolean(stored.can_create),
+                    can_update: superAdmin || Boolean(stored.can_update),
+                    can_delete: superAdmin || Boolean(stored.can_delete),
+                  }
 
                   return (
-                    <label className="user-role-permission-card" key={menu.id}>
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={selectedRole?.role_code === "SUPER_ADMIN"}
-                        onChange={() => togglePermission(Number(menu.id))}
-                      />
-
-                      <div>
-                        <strong>{menu.label}</strong>
-                        <span>{menu.href}</span>
+                    <article className="user-role-permission-card permission-matrix-card" key={menu.id}>
+                      <div className="permission-matrix-title">
+                        <div>
+                          <strong>{menu.label}</strong>
+                          <span>{menu.href}</span>
+                        </div>
+                        {menu.badge ? <b>{menu.badge}</b> : null}
                       </div>
 
-                      {menu.badge ? <b>{menu.badge}</b> : null}
-                    </label>
+                      <div className="permission-matrix-actions">
+                        {[
+                          ["can_view", "Lihat"],
+                          ["can_create", "Tambah"],
+                          ["can_update", "Ubah"],
+                          ["can_delete", "Hapus"],
+                        ].map(([permissionName, label]) => (
+                          <label key={permissionName}>
+                            <input
+                              type="checkbox"
+                              checked={permissions[permissionName]}
+                              disabled={superAdmin}
+                              onChange={() => togglePermission(menuId, permissionName)}
+                            />
+                            <span>{label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </article>
                   )
                 })}
               </div>
@@ -1129,6 +1290,14 @@ export default function UserRoleMaintenancePage() {
             <form onSubmit={handleUserSubmit}>
               <div className="user-role-form-grid">
                 <div className="user-role-form-field full">
+                  <label htmlFor="pegawai_search">Cari Pegawai</label>
+                  <input
+                    id="pegawai_search"
+                    type="search"
+                    value={pegawaiSearch}
+                    onChange={(event) => setPegawaiSearch(event.target.value)}
+                    placeholder="Ketik nama, NIP, jabatan, atau unit kerja..."
+                  />
                   <label htmlFor="pegawai_id">Pegawai</label>
                   <select
                     id="pegawai_id"
@@ -1138,13 +1307,16 @@ export default function UserRoleMaintenancePage() {
                     required={requiresPegawai}
                   >
                     <option value="">
-                      {requiresPegawai
-                        ? "Pilih pegawai"
-                        : "Akun sistem tanpa pegawai"}
+                      {pegawaiLoading
+                        ? "Memuat pegawai..."
+                        : requiresPegawai
+                          ? "Pilih pegawai"
+                          : "Akun sistem tanpa pegawai"}
                     </option>
                     {availablePegawai.map((pegawai) => (
                       <option key={pegawai.id} value={pegawai.id}>
                         {pegawai.nip || "Tanpa NIP"} - {pegawai.nama}
+                        {pegawai.jabatan ? ` - ${pegawai.jabatan}` : ""}
                         {pegawai.nama_uker ? ` (${pegawai.nama_uker})` : ""}
                       </option>
                     ))}

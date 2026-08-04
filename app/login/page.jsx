@@ -4,6 +4,30 @@ import Image from "next/image"
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 
+async function readJsonResponse(response) {
+  const contentType =
+    response.headers.get("content-type") || ""
+
+  if (!contentType.includes("application/json")) {
+    const responseText = await response.text()
+
+    console.error("Login endpoint non-JSON response:", {
+      status: response.status,
+      statusText: response.statusText,
+      contentType,
+      bodyPreview: responseText.slice(0, 300),
+    })
+
+    throw new Error(
+      response.status === 404
+        ? "Endpoint login tidak ditemukan. Pastikan app/api/auth/login/route.js terdaftar dan Proxy tidak mencegat /api."
+        : `Server mengembalikan respons non-JSON (HTTP ${response.status}).`
+    )
+  }
+
+  return response.json()
+}
+
 function getRedirectPath() {
   if (typeof window === "undefined") {
     return "/dashboard"
@@ -65,8 +89,11 @@ export default function LoginPage() {
         )
 
         if (response.ok) {
+          const result = await response.json()
           router.replace(
-            getRedirectPath()
+            result.data?.mustChangePassword
+              ? "/change-password"
+              : getRedirectPath()
           )
 
           return
@@ -127,7 +154,7 @@ export default function LoginPage() {
       )
 
       const result =
-        await response.json()
+        await readJsonResponse(response)
 
       if (
         !response.ok ||
@@ -142,7 +169,9 @@ export default function LoginPage() {
       }
 
       router.replace(
-        getRedirectPath()
+        result.data?.mustChangePassword
+          ? "/change-password"
+          : getRedirectPath()
       )
 
       router.refresh()
@@ -153,7 +182,9 @@ export default function LoginPage() {
       )
 
       setMessage(
-        "Tidak dapat terhubung ke server."
+        error instanceof Error
+          ? error.message
+          : "Tidak dapat terhubung ke server."
       )
     } finally {
       setIsSubmitting(false)

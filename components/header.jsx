@@ -3,9 +3,12 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react"
+import Image from "next/image"
 import { useRouter } from "next/navigation"
+import { useAppBootstrap } from "@/components/app-bootstrap-context"
 
 function createInitials(fullName) {
   if (!fullName) {
@@ -29,79 +32,132 @@ function createInitials(fullName) {
   ).toUpperCase()
 }
 
+function displayValue(value, fallback = "-") {
+  if (
+    value === null ||
+    value === undefined ||
+    String(value).trim() === ""
+  ) {
+    return fallback
+  }
+
+  return String(value)
+}
+
+function ProfileAvatar({
+  photo,
+  initials,
+  className = "",
+}) {
+  const [failedPhoto, setFailedPhoto] =
+    useState("")
+
+  const showPhoto = Boolean(photo) && failedPhoto !== photo
+
+  return (
+    <div
+      className={`profile-avatar ${className}`.trim()}
+      aria-hidden="true"
+    >
+      {showPhoto ? (
+        <Image
+          src={photo}
+          alt=""
+          width={54}
+          height={54}
+          sizes="54px"
+          unoptimized
+          onError={() => setFailedPhoto(photo)}
+        />
+      ) : (
+        <span>{initials}</span>
+      )}
+
+      <i className="profile-online-dot" />
+    </div>
+  )
+}
+
+function ProfileDetail({ label, value }) {
+  return (
+    <div className="profile-detail-row">
+      <span>{label}</span>
+      <strong title={displayValue(value)}>
+        {displayValue(value)}
+      </strong>
+    </div>
+  )
+}
+
 export function Header() {
   const router = useRouter()
-
-  const [user, setUser] =
-    useState(null)
-
-  const [isLoading, setIsLoading] =
-    useState(true)
-
+  const profileMenuRef = useRef(null)
+  const { user } = useAppBootstrap()
+  const isLoading = false
   const [isLoggingOut, setIsLoggingOut] =
+    useState(false)
+  const [isProfileOpen, setIsProfileOpen] =
     useState(false)
 
   useEffect(() => {
-    let isMounted = true
-
-    async function loadCurrentUser() {
-      try {
-        const response = await fetch(
-          "/api/auth/me",
-          {
-            method: "GET",
-            credentials: "include",
-            cache: "no-store",
-          }
+    function handlePointerDown(event) {
+      if (
+        profileMenuRef.current &&
+        !profileMenuRef.current.contains(
+          event.target
         )
-
-        const result =
-          await response.json()
-
-        if (response.status === 401) {
-          router.replace("/login")
-          return
-        }
-
-        if (
-          !response.ok ||
-          !result.success
-        ) {
-          throw new Error(
-            result.message ||
-              "Gagal mengambil data user."
-          )
-        }
-
-        if (isMounted) {
-          setUser(result.data)
-        }
-      } catch (error) {
-        console.error(
-          "Gagal membaca user:",
-          error
-        )
-      } finally {
-        if (isMounted) {
-          setIsLoading(false)
-        }
+      ) {
+        setIsProfileOpen(false)
       }
     }
 
-    loadCurrentUser()
+    function handleKeyDown(event) {
+      if (event.key === "Escape") {
+        setIsProfileOpen(false)
+      }
+    }
+
+    document.addEventListener(
+      "mousedown",
+      handlePointerDown
+    )
+    document.addEventListener(
+      "keydown",
+      handleKeyDown
+    )
 
     return () => {
-      isMounted = false
+      document.removeEventListener(
+        "mousedown",
+        handlePointerDown
+      )
+      document.removeEventListener(
+        "keydown",
+        handleKeyDown
+      )
     }
-  }, [router])
+  }, [])
+
+  const profileName =
+    user?.pegawai?.nama ||
+    user?.fullName ||
+    user?.username ||
+    "User"
 
   const initials = useMemo(
-    () =>
-      createInitials(
-        user?.fullName
-      ),
-    [user?.fullName]
+    () => createInitials(profileName),
+    [profileName]
   )
+
+  const unitKerja =
+    user?.pegawai?.unitKerja?.namaUker ||
+    user?.ukerName ||
+    (user?.roleCode === "SUPER_ADMIN"
+      ? "Seluruh unit kerja"
+      : null)
+
+  const profileEmail =
+    user?.pegawai?.email || user?.email
 
   async function handleLogout() {
     if (isLoggingOut) {
@@ -110,14 +166,12 @@ export function Header() {
 
     try {
       setIsLoggingOut(true)
+      setIsProfileOpen(false)
 
-      await fetch(
-        "/api/auth/logout",
-        {
-          method: "POST",
-          credentials: "include",
-        }
-      )
+      await fetch("/api/auth/logout", {
+        method: "POST",
+        credentials: "include",
+      })
     } catch (error) {
       console.error(
         "Logout error:",
@@ -128,6 +182,11 @@ export function Header() {
       router.refresh()
       setIsLoggingOut(false)
     }
+  }
+
+  function openChangePassword() {
+    setIsProfileOpen(false)
+    router.push("/change-password")
   }
 
   return (
@@ -174,28 +233,131 @@ export function Header() {
         </button>
 
         <div
-          className="user-menu"
-          aria-label="Profil pengguna"
+          className="profile-menu-wrapper"
+          ref={profileMenuRef}
         >
-          <div className="profile-chip">
-            {isLoading ? "..." : initials}
-          </div>
+          <button
+            className={`user-menu profile-menu-trigger${
+              isProfileOpen ? " is-open" : ""
+            }`}
+            type="button"
+            aria-label="Buka informasi profil pengguna"
+            aria-haspopup="dialog"
+            aria-expanded={isProfileOpen}
+            onClick={() =>
+              setIsProfileOpen(
+                (current) => !current
+              )
+            }
+            disabled={isLoading}
+          >
+            <ProfileAvatar
+              photo={user?.pegawai?.foto}
+              initials={
+                isLoading ? "..." : initials
+              }
+            />
 
-          <div className="user-menu-copy">
-            <strong>
-              {isLoading
-                ? "Memuat user..."
-                : user?.fullName ||
-                  user?.username ||
-                  "User"}
-            </strong>
+            <span className="user-menu-copy">
+              <strong>
+                {isLoading
+                  ? "Memuat user..."
+                  : profileName}
+              </strong>
 
-            <span>
-              {isLoading
-                ? "Memuat role..."
-                : user?.roleName || "-"}
+              <span>
+                {isLoading
+                  ? "Memuat role..."
+                  : user?.roleName || "-"}
+              </span>
             </span>
-          </div>
+
+            <span
+              className="profile-menu-chevron"
+              aria-hidden="true"
+            >
+              ▾
+            </span>
+          </button>
+
+          {isProfileOpen && user ? (
+            <section
+              className="profile-dropdown"
+              role="dialog"
+              aria-label="Informasi profil pengguna"
+            >
+              <div className="profile-dropdown-head">
+                <ProfileAvatar
+                  photo={user?.pegawai?.foto}
+                  initials={initials}
+                  className="profile-avatar-large"
+                />
+
+                <div>
+                  <strong>{profileName}</strong>
+                  <span>
+                    {displayValue(
+                      user?.roleName
+                    )}
+                  </span>
+                  <small>
+                    <i /> Akun aktif
+                  </small>
+                </div>
+              </div>
+
+              <div className="profile-detail-list">
+                <ProfileDetail
+                  label="Username"
+                  value={user?.username}
+                />
+                <ProfileDetail
+                  label="NIP"
+                  value={user?.pegawai?.nip}
+                />
+                <ProfileDetail
+                  label="Jabatan"
+                  value={
+                    user?.pegawai?.jabatan
+                  }
+                />
+                <ProfileDetail
+                  label="Unit kerja"
+                  value={unitKerja}
+                />
+                <ProfileDetail
+                  label="Email"
+                  value={profileEmail}
+                />
+                <ProfileDetail
+                  label="No. handphone"
+                  value={
+                    user?.pegawai?.handphone
+                  }
+                />
+              </div>
+
+              <div className="profile-dropdown-actions">
+                <button
+                  type="button"
+                  onClick={openChangePassword}
+                >
+                  Ubah Password
+                </button>
+
+                <button
+                  className="profile-logout-action"
+                  type="button"
+                  onClick={handleLogout}
+                  disabled={isLoggingOut}
+                >
+                  {isLoggingOut
+                    ? "Keluar..."
+                    : "Logout"}
+                </button>
+              </div>
+            </section>
+          ) : null}
         </div>
 
         <button

@@ -3,6 +3,10 @@ import { NextResponse } from "next/server"
 
 import { authorizeApiRequest } from "@/lib/access-control"
 import { connectDB, sql } from "@/lib/mssql"
+import { normalizePositiveInteger } from "@/lib/database/pagination"
+import { normalizeRowVersionToken } from "@/modules/master-mesin/row-version"
+import { writeAuditLog } from "@/lib/security/audit-log"
+import { validatePasswordPolicy } from "@/lib/security/password-policy"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -99,36 +103,8 @@ function validateEmail(email) {
   return null
 }
 
-function validatePassword(password) {
-  if (!password) {
-    return "Password wajib diisi."
-  }
-
-  if (password.length < 10 || password.length > 72) {
-    return "Password harus terdiri dari 10 sampai 72 karakter."
-  }
-
-  if (!/[a-z]/.test(password)) {
-    return "Password harus memiliki huruf kecil."
-  }
-
-  if (!/[A-Z]/.test(password)) {
-    return "Password harus memiliki huruf besar."
-  }
-
-  if (!/[0-9]/.test(password)) {
-    return "Password harus memiliki angka."
-  }
-
-  if (!/[^A-Za-z0-9]/.test(password)) {
-    return "Password harus memiliki karakter khusus."
-  }
-
-  return null
-}
-
-async function authorizeSettings(request) {
-  const authorization = await authorizeApiRequest(request, "/settings")
+async function authorizeSettings(request, action = "view") {
+  const authorization = await authorizeApiRequest(request, "/settings", action)
 
   if (!authorization.authorized) {
     return authorization
@@ -252,7 +228,8 @@ async function getUserById(db, userId) {
         END AS uker_name,
         u.is_active,
         r.role_code,
-        r.role_name
+        r.role_name,
+        CONVERT(VARCHAR(18), CONVERT(VARBINARY(8), u.row_version), 1) AS row_version
       FROM dbo.users u
       INNER JOIN dbo.roles r
         ON r.id = u.role_id
@@ -265,7 +242,8 @@ async function getUserById(db, userId) {
       WHERE u.id = @userId;
     `)
 
-  return result.recordset[0] || null
+  const item = result.recordset[0] || null
+  return item ? { ...item, row_version: normalizeRowVersionToken(item.row_version) } : null
 }
 
 async function ensureEmailIsUnique(db, email, ignoredUserId = null) {
@@ -322,142 +300,35 @@ async function countOtherActiveSuperAdmins(db, ignoredUserId) {
   return Number(result.recordset[0]?.total || 0)
 }
 
-async function loadUserRoleData(db, currentUserId) {
-  const [
-    usersResult,
-    rolesResult,
-    menusResult,
-    permissionsResult,
-    pegawaiResult,
-  ] = await Promise.all([
+async function loadReferenceData(db) {
+  const [rolesResult, menusResult, permissionsResult] = await Promise.all([
     db.request().query(`
-      SELECT
-        u.id,
-        u.username,
-        COALESCE(NULLIF(p.nama, ''), u.full_name) AS full_name,
-        COALESCE(NULLIF(p.email, ''), u.email) AS email,
-        u.pegawai_id,
-        p.nip AS pegawai_nip,
-        p.nama AS pegawai_nama,
-        p.email AS pegawai_email,
-        p.jabatan AS pegawai_jabatan,
-        p.status AS pegawai_status,
-        p.status_peg AS pegawai_status_kepegawaian,
-        p.uker_id AS pegawai_uker_id,
-        pegawai_uker.codeuker AS pegawai_codeuker,
-        pegawai_uker.nama_uker AS pegawai_uker_name,
-        u.role_id,
-        u.codeuker AS stored_codeuker,
-        CASE
-          WHEN r.role_code = '${ROLE_CODE_SUPER_ADMIN}' THEN NULL
-          ELSE COALESCE(pegawai_uker.codeuker, u.codeuker)
-        END AS codeuker,
-        CASE
-          WHEN r.role_code = '${ROLE_CODE_SUPER_ADMIN}' THEN NULL
-          ELSE COALESCE(pegawai_uker.nama_uker, mu.nama_uker)
-        END AS uker_name,
-        r.role_code,
-        r.role_name,
-        u.is_active,
-        u.must_change_password,
-        u.failed_login_count,
-        u.locked_until,
-        CASE
-          WHEN u.locked_until IS NOT NULL
-            AND u.locked_until > SYSDATETIME()
-          THEN CAST(1 AS BIT)
-          ELSE CAST(0 AS BIT)
-        END AS is_locked,
-        u.last_login_at,
-        u.password_changed_at,
-        u.created_at,
-        u.updated_at
-      FROM dbo.users u
-      INNER JOIN dbo.roles r
-        ON r.id = u.role_id
-      LEFT JOIN dbo.master_uker mu
-        ON mu.codeuker = u.codeuker
-      LEFT JOIN dbo.pegawai p
-        ON p.id = u.pegawai_id
-      LEFT JOIN dbo.master_uker pegawai_uker
-        ON pegawai_uker.id = p.uker_id
-      ORDER BY
-        CASE WHEN r.role_code = '${ROLE_CODE_SUPER_ADMIN}' THEN 0 ELSE 1 END,
-        COALESCE(NULLIF(p.nama, ''), u.full_name) ASC,
-        u.id ASC;
-    `),
-    db.request().query(`
-      SELECT
-        id,
-        role_code,
-        role_name,
-        description,
-        is_active
+      SELECT id, role_code, role_name, description, is_active
       FROM dbo.roles
       WHERE is_active = 1
       ORDER BY id ASC;
     `),
     db.request().query(`
-      SELECT
-        id,
-        label,
-        href,
-        icon,
-        badge,
-        sort_order,
-        is_active
+      SELECT id, label, href, icon, badge, sort_order, is_active
       FROM dbo.sidebar_routes
       WHERE is_active = 1
       ORDER BY sort_order ASC, id ASC;
     `),
     db.request().query(`
-      SELECT
-        role_id,
-        sidebar_route_id
-      FROM dbo.role_sidebar_routes
-      WHERE can_view = 1;
-    `),
-    db.request().query(`
-      SELECT
-        p.id,
-        p.nip,
-        p.nama,
-        p.email,
-        p.jabatan,
-        p.status,
-        p.status_peg,
-        p.uker_id,
-        mu.codeuker,
-        mu.nama_uker,
-        linked_user.user_id,
-        linked_user.username
-      FROM dbo.pegawai p
-      LEFT JOIN dbo.master_uker mu
-        ON mu.id = p.uker_id
-      OUTER APPLY (
-        SELECT TOP 1
-          u.id AS user_id,
-          u.username
-        FROM dbo.users u
-        WHERE u.pegawai_id = p.id
-        ORDER BY u.id ASC
-      ) linked_user
-      ORDER BY p.nama ASC, p.nip ASC, p.id ASC;
+      SELECT role_id, sidebar_route_id, can_view, can_create, can_update, can_delete
+      FROM dbo.role_sidebar_routes;
     `),
   ])
 
   return {
-    currentUserId,
-    users: usersResult.recordset,
     roles: rolesResult.recordset,
     menus: menusResult.recordset,
     permissions: permissionsResult.recordset,
-    pegawai: pegawaiResult.recordset,
   }
 }
 
 export async function GET(request) {
-  const authorization = await authorizeSettings(request)
+  const authorization = await authorizeSettings(request, "view")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -465,21 +336,227 @@ export async function GET(request) {
 
   try {
     const db = await connectDB()
-    const data = await loadUserRoleData(db, Number(authorization.user.id))
+    const { searchParams } = new URL(request.url)
+    const mode = normalizeText(searchParams.get("mode")).toLowerCase()
+
+    if (mode === "pegawai-options") {
+      const search = normalizeText(searchParams.get("search"))
+      const selectedUserId = Number(searchParams.get("selected_user_id"))
+      const limit = normalizePositiveInteger(searchParams.get("limit"), 100, 200)
+
+      const result = await db
+        .request()
+        .input("search", sql.NVarChar(255), search ? `%${search}%` : null)
+        .input(
+          "selectedUserId",
+          sql.Int,
+          Number.isSafeInteger(selectedUserId) && selectedUserId > 0
+            ? selectedUserId
+            : null
+        )
+        .input("limit", sql.Int, limit)
+        .query(`
+          SELECT TOP (@limit)
+            p.id,
+            p.nip,
+            p.nama,
+            p.email,
+            p.jabatan,
+            p.status,
+            p.status_peg,
+            p.uker_id,
+            mu.codeuker,
+            mu.nama_uker,
+            linked_user.user_id,
+            linked_user.username
+          FROM dbo.pegawai p
+          LEFT JOIN dbo.master_uker mu ON mu.id = p.uker_id
+          OUTER APPLY (
+            SELECT TOP 1 u.id AS user_id, u.username
+            FROM dbo.users u
+            WHERE u.pegawai_id = p.id
+            ORDER BY u.id ASC
+          ) linked_user
+          WHERE
+            (
+              (p.status = 1 AND linked_user.user_id IS NULL)
+              OR linked_user.user_id = @selectedUserId
+            )
+            AND UPPER(REPLACE(ISNULL(p.jabatan, ''), ' ', '')) <> 'SUPERADMIN'
+            AND (
+              @search IS NULL
+              OR p.nip LIKE @search
+              OR p.nama LIKE @search
+              OR p.email LIKE @search
+              OR p.jabatan LIKE @search
+              OR mu.codeuker LIKE @search
+              OR mu.nama_uker LIKE @search
+            )
+          ORDER BY
+            CASE WHEN linked_user.user_id = @selectedUserId THEN 0 ELSE 1 END,
+            p.nama ASC,
+            p.nip ASC,
+            p.id ASC;
+        `)
+
+      return NextResponse.json({
+        success: true,
+        data: { pegawai: result.recordset },
+      })
+    }
+
+    const page = normalizePositiveInteger(searchParams.get("page"), 1, 1000000)
+    const pageSize = normalizePositiveInteger(searchParams.get("page_size"), 20, 100)
+    const offset = (page - 1) * pageSize
+    const search = normalizeText(searchParams.get("search"))
+    const roleCode = normalizeText(searchParams.get("role")).toUpperCase()
+    const status = normalizeText(searchParams.get("status")).toUpperCase()
+
+    const addInputs = (dbRequest) =>
+      dbRequest
+        .input("search", sql.NVarChar(255), search ? `%${search}%` : null)
+        .input("roleCode", sql.VarChar(50), roleCode && roleCode !== "ALL" ? roleCode : null)
+        .input("status", sql.VarChar(20), status && status !== "ALL" ? status : null)
+
+    const joins = `
+      FROM dbo.users u
+      INNER JOIN dbo.roles r ON r.id = u.role_id
+      LEFT JOIN dbo.master_uker mu ON mu.codeuker = u.codeuker
+      LEFT JOIN dbo.pegawai p ON p.id = u.pegawai_id
+      LEFT JOIN dbo.master_uker pegawai_uker ON pegawai_uker.id = p.uker_id
+    `
+
+    const whereClause = `
+      WHERE (@roleCode IS NULL OR r.role_code = @roleCode)
+        AND (
+          @status IS NULL
+          OR (@status = 'ACTIVE' AND u.is_active = 1)
+          OR (@status = 'INACTIVE' AND u.is_active = 0)
+          OR (
+            @status = 'LOCKED'
+            AND u.locked_until IS NOT NULL
+            AND u.locked_until > SYSDATETIME()
+          )
+        )
+        AND (
+          @search IS NULL
+          OR u.username LIKE @search
+          OR u.full_name LIKE @search
+          OR u.email LIKE @search
+          OR p.nip LIKE @search
+          OR p.nama LIKE @search
+          OR p.jabatan LIKE @search
+          OR r.role_name LIKE @search
+          OR u.codeuker LIKE @search
+          OR mu.nama_uker LIKE @search
+          OR pegawai_uker.nama_uker LIKE @search
+        )
+    `
+
+    const [listResult, countResult, summaryResult, referenceData] = await Promise.all([
+      addInputs(db.request())
+        .input("offset", sql.Int, offset)
+        .input("pageSize", sql.Int, pageSize)
+        .query(`
+          SELECT
+            u.id,
+            u.username,
+            COALESCE(NULLIF(p.nama, ''), u.full_name) AS full_name,
+            COALESCE(NULLIF(p.email, ''), u.email) AS email,
+            u.pegawai_id,
+            p.nip AS pegawai_nip,
+            p.nama AS pegawai_nama,
+            p.email AS pegawai_email,
+            p.jabatan AS pegawai_jabatan,
+            p.status AS pegawai_status,
+            p.status_peg AS pegawai_status_kepegawaian,
+            p.uker_id AS pegawai_uker_id,
+            pegawai_uker.codeuker AS pegawai_codeuker,
+            pegawai_uker.nama_uker AS pegawai_uker_name,
+            u.role_id,
+            u.codeuker AS stored_codeuker,
+            CASE
+              WHEN r.role_code = '${ROLE_CODE_SUPER_ADMIN}' THEN NULL
+              ELSE COALESCE(pegawai_uker.codeuker, u.codeuker)
+            END AS codeuker,
+            CASE
+              WHEN r.role_code = '${ROLE_CODE_SUPER_ADMIN}' THEN NULL
+              ELSE COALESCE(pegawai_uker.nama_uker, mu.nama_uker)
+            END AS uker_name,
+            r.role_code,
+            r.role_name,
+            u.is_active,
+            u.must_change_password,
+            u.failed_login_count,
+            u.locked_until,
+            CASE
+              WHEN u.locked_until IS NOT NULL AND u.locked_until > SYSDATETIME()
+              THEN CAST(1 AS BIT)
+              ELSE CAST(0 AS BIT)
+            END AS is_locked,
+            u.last_login_at,
+            u.password_changed_at,
+            u.created_at,
+            u.updated_at,
+            CONVERT(VARCHAR(18), CONVERT(VARBINARY(8), u.row_version), 1) AS row_version
+          ${joins}
+          ${whereClause}
+          ORDER BY
+            CASE WHEN r.role_code = '${ROLE_CODE_SUPER_ADMIN}' THEN 0 ELSE 1 END,
+            COALESCE(NULLIF(p.nama, ''), u.full_name) ASC,
+            u.id ASC
+          OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;
+        `),
+      addInputs(db.request()).query(`
+        SELECT COUNT_BIG(*) AS total
+        ${joins}
+        ${whereClause};
+      `),
+      db.request().query(`
+        SELECT
+          COUNT_BIG(*) AS total,
+          SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active,
+          SUM(CASE WHEN locked_until IS NOT NULL AND locked_until > SYSDATETIME() THEN 1 ELSE 0 END) AS locked
+        FROM dbo.users;
+      `),
+      loadReferenceData(db),
+    ])
+
+    const total = Number(countResult.recordset[0]?.total || 0)
+    const summaryRow = summaryResult.recordset[0] || {}
 
     return NextResponse.json({
       success: true,
-      data,
+      data: {
+        currentUserId: Number(authorization.user.id),
+        users: listResult.recordset.map((item) => ({
+          ...item,
+          row_version: normalizeRowVersionToken(item.row_version),
+        })),
+        ...referenceData,
+        pegawai: [],
+        pagination: {
+          page,
+          page_size: pageSize,
+          total,
+          total_pages: Math.max(1, Math.ceil(total / pageSize)),
+        },
+        summary: {
+          total: Number(summaryRow.total || 0),
+          active: Number(summaryRow.active || 0),
+          locked: Number(summaryRow.locked || 0),
+          roleCount: referenceData.roles.length,
+        },
+      },
     })
   } catch (error) {
     console.error("GET user role error:", error)
-
-    return createErrorResponse("Gagal mengambil data user, pegawai, dan role.", 500)
+    return createErrorResponse("Gagal mengambil data user dan role.", 500)
   }
 }
 
 export async function POST(request) {
-  const authorization = await authorizeSettings(request)
+  const authorization = await authorizeSettings(request, "create")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -495,7 +572,7 @@ export async function POST(request) {
     const isActive = normalizeBoolean(body.is_active, true)
 
     const usernameError = validateUsername(username)
-    const passwordError = validatePassword(password)
+    const passwordError = validatePasswordPolicy(password)
 
     if (usernameError) {
       return createErrorResponse(usernameError)
@@ -636,6 +713,26 @@ export async function POST(request) {
 
     const createdUser = await getUserById(db, result.recordset[0].id)
 
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "CREATE",
+      module: "settings.user_role",
+      entityType: "user",
+      entityId: createdUser.id,
+      metadata: {
+        after: {
+          username: createdUser.username,
+          pegawai_id: createdUser.pegawai_id,
+          role_id: createdUser.role_id,
+          role_code: createdUser.role_code,
+          codeuker: createdUser.codeuker,
+          is_active: createdUser.is_active,
+          must_change_password: true,
+        },
+      },
+    })
+
     return NextResponse.json(
       {
         success: true,
@@ -662,7 +759,7 @@ export async function POST(request) {
 }
 
 export async function PUT(request) {
-  const authorization = await authorizeSettings(request)
+  const authorization = await authorizeSettings(request, "update")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -675,6 +772,7 @@ export async function PUT(request) {
     const roleId = Number(body.role_id)
     const pegawaiId = normalizeOptionalId(body.pegawai_id)
     const isActive = normalizeBoolean(body.is_active, true)
+    const requestedRowVersion = normalizeRowVersionToken(body.row_version)
 
     if (!Number.isInteger(userId) || userId <= 0) {
       return createErrorResponse("ID user tidak valid.")
@@ -688,11 +786,25 @@ export async function PUT(request) {
       return createErrorResponse("Pegawai yang dipilih tidak valid.")
     }
 
+    if (!requestedRowVersion) {
+      return createErrorResponse(
+        "Versi data user tidak tersedia. Muat ulang sebelum menyimpan.",
+        409
+      )
+    }
+
     const db = await connectDB()
     const existingUser = await getUserById(db, userId)
 
     if (!existingUser) {
       return createErrorResponse("User tidak ditemukan.", 404)
+    }
+
+    if (requestedRowVersion !== normalizeRowVersionToken(existingUser.row_version)) {
+      return createErrorResponse(
+        "Data user telah berubah oleh pengguna lain. Muat ulang sebelum menyimpan.",
+        409
+      )
     }
 
     const targetRole = await findActiveRole(db, roleId)
@@ -794,9 +906,14 @@ export async function PUT(request) {
       return createErrorResponse("Email pegawai sudah digunakan oleh akun lain.", 409)
     }
 
-    await db
+    const updateResult = await db
       .request()
       .input("userId", sql.Int, userId)
+      .input(
+        "rowVersion",
+        sql.VarBinary(8),
+        Buffer.from(requestedRowVersion.slice(2), "hex")
+      )
       .input("fullName", sql.VarChar(100), fullName)
       .input("email", sql.VarChar(150), email || null)
       .input("roleId", sql.Int, targetRole.id)
@@ -813,8 +930,16 @@ export async function PUT(request) {
           codeuker = @codeUker,
           is_active = @isActive,
           updated_at = SYSDATETIME()
-        WHERE id = @userId;
+        WHERE id = @userId
+          AND row_version = @rowVersion;
       `)
+
+    if (Number(updateResult.rowsAffected?.[0] || 0) === 0) {
+      return createErrorResponse(
+        "Data user telah berubah oleh pengguna lain. Muat ulang sebelum menyimpan.",
+        409
+      )
+    }
 
     const identityOrScopeChanged =
       Number(existingUser.pegawai_id || 0) !== Number(pegawaiId || 0) ||
@@ -834,6 +959,34 @@ export async function PUT(request) {
     }
 
     const updatedUser = await getUserById(db, userId)
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "UPDATE",
+      module: "settings.user_role",
+      entityType: "user",
+      entityId: userId,
+      metadata: {
+        before: {
+          username: existingUser.username,
+          pegawai_id: existingUser.pegawai_id,
+          role_id: existingUser.role_id,
+          role_code: existingUser.role_code,
+          codeuker: existingUser.codeuker,
+          is_active: existingUser.is_active,
+        },
+        after: {
+          username: updatedUser.username,
+          pegawai_id: updatedUser.pegawai_id,
+          role_id: updatedUser.role_id,
+          role_code: updatedUser.role_code,
+          codeuker: updatedUser.codeuker,
+          is_active: updatedUser.is_active,
+        },
+        sessions_revoked: !isActive || identityOrScopeChanged,
+      },
+    })
 
     return NextResponse.json({
       success: true,
@@ -857,7 +1010,7 @@ export async function PUT(request) {
 
 
 export async function DELETE(request) {
-  const authorization = await authorizeSettings(request)
+  const authorization = await authorizeSettings(request, "delete")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -921,6 +1074,26 @@ export async function DELETE(request) {
       throw error
     }
 
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "DELETE",
+      module: "settings.user_role",
+      entityType: "user",
+      entityId: userId,
+      metadata: {
+        before: {
+          username: existingUser.username,
+          pegawai_id: existingUser.pegawai_id,
+          role_id: existingUser.role_id,
+          role_code: existingUser.role_code,
+          codeuker: existingUser.codeuker,
+          is_active: existingUser.is_active,
+        },
+        sessions_deleted: true,
+      },
+    })
+
     return NextResponse.json({
       success: true,
       message: `Akun @${existingUser.username} berhasil dihapus. Data pegawai tetap tersimpan.`,
@@ -954,7 +1127,7 @@ export async function DELETE(request) {
 }
 
 export async function PATCH(request) {
-  const authorization = await authorizeSettings(request)
+  const authorization = await authorizeSettings(request, "update")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -990,6 +1163,20 @@ export async function PATCH(request) {
           WHERE id = @userId;
         `)
 
+      await writeAuditLog({
+        request,
+        userId: authorization.user.id,
+        action: "UNLOCK_USER",
+        module: "settings.user_role",
+        entityType: "user",
+        entityId: userId,
+        metadata: {
+          target_username: existingUser.username,
+          failed_login_count_reset: true,
+          locked_until_cleared: true,
+        },
+      })
+
       return NextResponse.json({
         success: true,
         message: "Kunci akun berhasil dibuka.",
@@ -1004,7 +1191,7 @@ export async function PATCH(request) {
         return createErrorResponse("ID user tidak valid.")
       }
 
-      const passwordError = validatePassword(password)
+      const passwordError = validatePasswordPolicy(password)
 
       if (passwordError) {
         return createErrorResponse(passwordError)
@@ -1048,6 +1235,21 @@ export async function PATCH(request) {
         throw error
       }
 
+      await writeAuditLog({
+        request,
+        userId: authorization.user.id,
+        action: "RESET_PASSWORD",
+        module: "settings.user_role",
+        entityType: "user",
+        entityId: userId,
+        metadata: {
+          target_username: existingUser.username,
+          must_change_password: true,
+          sessions_revoked: true,
+          self_reset: userId === Number(authorization.user.id),
+        },
+      })
+
       return NextResponse.json({
         success: true,
         message:
@@ -1062,9 +1264,6 @@ export async function PATCH(request) {
 
     if (action === "save_permissions") {
       const roleId = Number(body.role_id)
-      const requestedMenuIds = Array.isArray(body.menu_ids)
-        ? body.menu_ids.map(Number).filter(Number.isInteger)
-        : []
 
       if (!Number.isInteger(roleId) || roleId <= 0) {
         return createErrorResponse("Role tidak valid.")
@@ -1085,28 +1284,84 @@ export async function PATCH(request) {
 
       const activeMenus = activeMenusResult.recordset
       const activeMenuIdSet = new Set(activeMenus.map((menu) => Number(menu.id)))
+      const legacyMenuIds = Array.isArray(body.menu_ids)
+        ? body.menu_ids.map(Number).filter(Number.isInteger)
+        : []
+      const requestedPermissions = Array.isArray(body.permissions)
+        ? body.permissions
+        : legacyMenuIds.map((menuId) => ({ menu_id: menuId, can_view: true }))
 
-      let selectedMenuIds = [
-        ...new Set(
-          requestedMenuIds.filter((menuId) => activeMenuIdSet.has(menuId))
-        ),
-      ]
+      const normalizedPermissionMap = new Map()
 
-      if (role.role_code === ROLE_CODE_SUPER_ADMIN) {
-        selectedMenuIds = activeMenus.map((menu) => Number(menu.id))
-      } else {
-        const dashboardMenu = activeMenus.find(
-          (menu) => menu.href === "/dashboard"
-        )
+      for (const item of requestedPermissions) {
+        const menuId = Number(item?.menu_id ?? item?.sidebar_route_id)
 
-        if (dashboardMenu && !selectedMenuIds.includes(Number(dashboardMenu.id))) {
-          selectedMenuIds.push(Number(dashboardMenu.id))
+        if (!Number.isInteger(menuId) || !activeMenuIdSet.has(menuId)) {
+          continue
+        }
+
+        const canCreate = Boolean(item?.can_create)
+        const canUpdate = Boolean(item?.can_update)
+        const canDelete = Boolean(item?.can_delete)
+        const canView = Boolean(item?.can_view) || canCreate || canUpdate || canDelete
+
+        if (canView) {
+          normalizedPermissionMap.set(menuId, {
+            menu_id: menuId,
+            can_view: true,
+            can_create: canCreate,
+            can_update: canUpdate,
+            can_delete: canDelete,
+          })
         }
       }
 
-      if (selectedMenuIds.length === 0) {
-        return createErrorResponse("Minimal satu menu harus dipilih.")
+      if (role.role_code === ROLE_CODE_SUPER_ADMIN) {
+        for (const menu of activeMenus) {
+          normalizedPermissionMap.set(Number(menu.id), {
+            menu_id: Number(menu.id),
+            can_view: true,
+            can_create: true,
+            can_update: true,
+            can_delete: true,
+          })
+        }
+      } else {
+        const dashboardMenu = activeMenus.find((menu) => menu.href === "/dashboard")
+        if (dashboardMenu) {
+          const dashboardId = Number(dashboardMenu.id)
+          const existing = normalizedPermissionMap.get(dashboardId) || {}
+          normalizedPermissionMap.set(dashboardId, {
+            menu_id: dashboardId,
+            can_view: true,
+            can_create: Boolean(existing.can_create),
+            can_update: Boolean(existing.can_update),
+            can_delete: Boolean(existing.can_delete),
+          })
+        }
       }
+
+      const normalizedPermissions = [...normalizedPermissionMap.values()]
+
+      if (normalizedPermissions.length === 0) {
+        return createErrorResponse("Minimal satu menu harus memiliki akses lihat.")
+      }
+
+      const existingPermissionsResult = await db
+        .request()
+        .input("roleId", sql.Int, roleId)
+        .query(`
+          SELECT
+            sidebar_route_id AS menu_id,
+            can_view,
+            can_create,
+            can_update,
+            can_delete
+          FROM dbo.role_sidebar_routes
+          WHERE role_id = @roleId
+          ORDER BY sidebar_route_id ASC;
+        `)
+      const existingPermissions = existingPermissionsResult.recordset
 
       const transaction = new sql.Transaction(db)
       await transaction.begin()
@@ -1119,16 +1374,23 @@ export async function PATCH(request) {
             WHERE role_id = @roleId;
           `)
 
-        for (const menuId of selectedMenuIds) {
+        for (const permission of normalizedPermissions) {
           await new sql.Request(transaction)
             .input("roleId", sql.Int, roleId)
-            .input("menuId", sql.Int, menuId)
+            .input("menuId", sql.Int, permission.menu_id)
+            .input("canView", sql.Bit, permission.can_view)
+            .input("canCreate", sql.Bit, permission.can_create)
+            .input("canUpdate", sql.Bit, permission.can_update)
+            .input("canDelete", sql.Bit, permission.can_delete)
             .query(`
               INSERT INTO dbo.role_sidebar_routes
               (
                 role_id,
                 sidebar_route_id,
                 can_view,
+                can_create,
+                can_update,
+                can_delete,
                 created_at,
                 updated_at
               )
@@ -1136,7 +1398,10 @@ export async function PATCH(request) {
               (
                 @roleId,
                 @menuId,
-                1,
+                @canView,
+                @canCreate,
+                @canUpdate,
+                @canDelete,
                 SYSDATETIME(),
                 SYSDATETIME()
               );
@@ -1149,12 +1414,27 @@ export async function PATCH(request) {
         throw error
       }
 
+      await writeAuditLog({
+        request,
+        userId: authorization.user.id,
+        action: "UPDATE_PERMISSIONS",
+        module: "settings.user_role",
+        entityType: "role_permissions",
+        entityId: roleId,
+        metadata: {
+          role_code: role.role_code,
+          role_name: role.role_name,
+          before: existingPermissions,
+          after: normalizedPermissions,
+        },
+      })
+
       return NextResponse.json({
         success: true,
         message: `Hak akses ${role.role_name} berhasil diperbarui.`,
         data: {
           role_id: roleId,
-          menu_ids: selectedMenuIds,
+          permissions: normalizedPermissions,
         },
       })
     }

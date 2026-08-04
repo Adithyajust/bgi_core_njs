@@ -2,20 +2,62 @@ import { NextResponse } from "next/server"
 
 import { authorizeApiRequest, getUserDataScope } from "@/lib/access-control"
 import { connectDB, sql } from "@/lib/mssql"
+import { normalizePositiveInteger } from "@/lib/database/pagination"
+import { normalizeRowVersionToken } from "@/modules/master-mesin/row-version"
+import { writeAuditLog } from "@/lib/security/audit-log"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
-function createErrorResponse(message, status = 400) {
+function createErrorResponse(message, status = 400, extra = {}) {
   return NextResponse.json(
-    {
-      success: false,
-      message,
-    },
-    {
-      status,
-    }
+    { success: false, message, ...extra },
+    { status }
   )
+}
+
+function getServerErrorMessage(error) {
+  return (
+    error?.originalError?.info?.message ||
+    error?.precedingErrors?.[0]?.message ||
+    error?.message ||
+    "Kesalahan server tidak diketahui."
+  )
+}
+
+function createInternalErrorResponse(error, fallbackMessage) {
+  const details = getServerErrorMessage(error)
+  const isDevelopment = process.env.NODE_ENV !== "production"
+
+  return createErrorResponse(
+    isDevelopment ? `${fallbackMessage} Detail: ${details}` : fallbackMessage,
+    500,
+    isDevelopment
+      ? {
+          error_code: error?.code || null,
+          sql_error_number: getSqlErrorNumber(error),
+        }
+      : {}
+  )
+}
+
+function createUkerSchemaErrorResponse(error) {
+  const details = getServerErrorMessage(error)
+
+  if (
+    getSqlErrorNumber(error) === 207 &&
+    /(?:^|[.\s])row_version(?:$|[.\s])/i.test(details)
+  ) {
+    return createErrorResponse(
+      "Struktur database Master Uker belum diperbarui. Jalankan `npm run db:migrate` untuk menerapkan migration 025-add-master-uker-row-version.sql.",
+      503,
+      process.env.NODE_ENV !== "production"
+        ? { migration: "025-add-master-uker-row-version.sql" }
+        : {}
+    )
+  }
+
+  return null
 }
 
 function normalizeText(value) {
@@ -181,8 +223,8 @@ function getSqlErrorNumber(error) {
   )
 }
 
-async function authorizeMaster(request) {
-  return authorizeApiRequest(request, "/masters")
+async function authorizeMaster(request, action = "view") {
+  return authorizeApiRequest(request, "/masters", action)
 }
 
 async function getUkerById(db, id, codeUker = null) {
@@ -203,13 +245,15 @@ async function getUkerById(db, id, codeUker = null) {
         CONVERT(CHAR(10), tanggal_ops, 23) AS tanggal_ops,
         codeuker,
         created_at,
-        updated_at
+        updated_at,
+        CONVERT(VARCHAR(18), CONVERT(VARBINARY(8), row_version), 1) AS row_version
       FROM dbo.master_uker
       WHERE id = @id
         AND (@codeUker IS NULL OR codeuker = @codeUker);
     `)
 
-  return result.recordset[0] || null
+  const item = result.recordset[0] || null
+  return item ? { ...item, row_version: normalizeRowVersionToken(item.row_version) } : null
 }
 
 async function isCodeUkerAvailable(db, codeUker, ignoredId = null) {
@@ -243,7 +287,7 @@ async function isCodeUkerAvailable(db, codeUker, ignoredId = null) {
 */
 
 export async function GET(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "view")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -259,55 +303,143 @@ export async function GET(request) {
       )
     }
 
+    const { searchParams } = new URL(request.url)
+    const mode = normalizeText(searchParams.get("mode")).toLowerCase()
     const db = await connectDB()
-    const dbRequest = db.request()
 
-    let whereClause = ""
+    if (mode === "options") {
+      const result = await db
+        .request()
+        .input("codeUker", sql.NVarChar(4), scope.codeUker)
+        .query(`
+          SELECT id, codeuker, nama_uker, kota
+          FROM dbo.master_uker
+          WHERE @codeUker IS NULL OR codeuker = @codeUker
+          ORDER BY codeuker ASC, nama_uker ASC, id ASC;
+        `)
 
-    if (!scope.isSuperAdmin) {
-      dbRequest.input("codeUker", sql.NVarChar(4), scope.codeUker)
-      whereClause = "WHERE codeuker = @codeUker"
+      return NextResponse.json({
+        success: true,
+        data: {
+          ukers: result.recordset,
+          scope: { isSuperAdmin: scope.isSuperAdmin, codeuker: scope.codeUker },
+        },
+      })
     }
 
-    const result = await dbRequest.query(`
-      SELECT
-        id,
-        nama_uker,
-        alamat_uker,
-        kota,
-        kode_pos,
-        telp_branch,
-        gedung_branch,
-        email,
-        CONVERT(CHAR(10), tanggal_ops, 23) AS tanggal_ops,
-        codeuker,
-        created_at,
-        updated_at
-      FROM dbo.master_uker
-      ${whereClause}
-      ORDER BY
-        codeuker ASC,
-        nama_uker ASC,
-        id ASC;
-    `)
+    const page = normalizePositiveInteger(searchParams.get("page"), 1, 1000000)
+    const pageSize = normalizePositiveInteger(searchParams.get("page_size"), 10, 100)
+    const offset = (page - 1) * pageSize
+    const search = normalizeText(searchParams.get("search"))
+    const city = normalizeText(searchParams.get("city"))
+
+    const addInputs = (dbRequest) =>
+      dbRequest
+        .input("codeUker", sql.NVarChar(4), scope.codeUker)
+        .input("search", sql.NVarChar(255), search ? `%${search}%` : null)
+        .input("city", sql.NVarChar(200), city || null)
+
+    const whereClause = `
+      WHERE (@codeUker IS NULL OR codeuker = @codeUker)
+        AND (@city IS NULL OR kota = @city)
+        AND (
+          @search IS NULL
+          OR codeuker LIKE @search
+          OR nama_uker LIKE @search
+          OR alamat_uker LIKE @search
+          OR kota LIKE @search
+          OR kode_pos LIKE @search
+          OR telp_branch LIKE @search
+          OR gedung_branch LIKE @search
+          OR email LIKE @search
+        )
+    `
+
+    const [listResult, countResult, summaryResult, citiesResult] = await Promise.all([
+      addInputs(db.request())
+        .input("offset", sql.Int, offset)
+        .input("pageSize", sql.Int, pageSize)
+        .query(`
+          SELECT
+            id,
+            nama_uker,
+            alamat_uker,
+            kota,
+            kode_pos,
+            telp_branch,
+            gedung_branch,
+            email,
+            CONVERT(CHAR(10), tanggal_ops, 23) AS tanggal_ops,
+            codeuker,
+            created_at,
+            updated_at,
+            CONVERT(VARCHAR(18), CONVERT(VARBINARY(8), row_version), 1) AS row_version
+          FROM dbo.master_uker
+          ${whereClause}
+          ORDER BY codeuker ASC, nama_uker ASC, id ASC
+          OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;
+        `),
+      addInputs(db.request()).query(`
+        SELECT COUNT_BIG(*) AS total
+        FROM dbo.master_uker
+        ${whereClause};
+      `),
+      db.request()
+        .input("codeUker", sql.NVarChar(4), scope.codeUker)
+        .query(`
+          SELECT
+            COUNT_BIG(*) AS total,
+            COUNT(DISTINCT NULLIF(LTRIM(RTRIM(kota)), '')) AS city_count,
+            SUM(CASE WHEN email IS NOT NULL AND LTRIM(RTRIM(email)) <> '' THEN 1 ELSE 0 END) AS with_email,
+            SUM(CASE WHEN tanggal_ops IS NOT NULL THEN 1 ELSE 0 END) AS operational
+          FROM dbo.master_uker
+          WHERE @codeUker IS NULL OR codeuker = @codeUker;
+        `),
+      db.request()
+        .input("codeUker", sql.NVarChar(4), scope.codeUker)
+        .query(`
+          SELECT DISTINCT kota
+          FROM dbo.master_uker
+          WHERE (@codeUker IS NULL OR codeuker = @codeUker)
+            AND kota IS NOT NULL
+            AND LTRIM(RTRIM(kota)) <> ''
+          ORDER BY kota ASC;
+        `),
+    ])
+
+    const total = Number(countResult.recordset[0]?.total || 0)
+    const summaryRow = summaryResult.recordset[0] || {}
 
     return NextResponse.json({
       success: true,
       data: {
-        ukers: result.recordset,
-        scope: {
-          isSuperAdmin: scope.isSuperAdmin,
-          codeUker: scope.codeUker,
+        ukers: listResult.recordset.map((item) => ({
+          ...item,
+          row_version: normalizeRowVersionToken(item.row_version),
+        })),
+        pagination: {
+          page,
+          page_size: pageSize,
+          total,
+          total_pages: Math.max(1, Math.ceil(total / pageSize)),
         },
+        summary: {
+          total: Number(summaryRow.total || 0),
+          cityCount: Number(summaryRow.city_count || 0),
+          withEmail: Number(summaryRow.with_email || 0),
+          operational: Number(summaryRow.operational || 0),
+        },
+        cities: citiesResult.recordset.map((item) => item.kota),
+        scope: { isSuperAdmin: scope.isSuperAdmin, codeUker: scope.codeUker },
       },
     })
   } catch (error) {
     console.error("GET master uker error:", error)
 
-    return createErrorResponse(
-      "Gagal mengambil data unit kerja.",
-      500
-    )
+    const schemaErrorResponse = createUkerSchemaErrorResponse(error)
+    if (schemaErrorResponse) return schemaErrorResponse
+
+    return createInternalErrorResponse(error, "Gagal mengambil data unit kerja.")
   }
 }
 
@@ -318,7 +450,7 @@ export async function GET(request) {
 */
 
 export async function POST(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "create")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -407,8 +539,18 @@ export async function POST(request) {
         );
       `)
 
-    const createdId = result.recordset[0]?.id
+    const createdId = Number(result.recordset[0]?.id)
     const createdUker = await getUkerById(db, createdId)
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "CREATE",
+      module: "masters.uker",
+      entityType: "master_uker",
+      entityId: createdId,
+      metadata: { after: createdUker },
+    })
 
     return NextResponse.json(
       {
@@ -436,9 +578,12 @@ export async function POST(request) {
       )
     }
 
-    return createErrorResponse(
-      "Gagal menambahkan data unit kerja.",
-      500
+    const schemaErrorResponse = createUkerSchemaErrorResponse(error)
+    if (schemaErrorResponse) return schemaErrorResponse
+
+    return createInternalErrorResponse(
+      error,
+      "Gagal menambahkan data unit kerja."
     )
   }
 }
@@ -450,7 +595,7 @@ export async function POST(request) {
 */
 
 export async function PUT(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "update")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -479,6 +624,14 @@ export async function PUT(request) {
       return createErrorResponse(validation.error)
     }
 
+    const requestedRowVersion = normalizeRowVersionToken(body.row_version)
+    if (!requestedRowVersion) {
+      return createErrorResponse(
+        "Versi data unit kerja tidak tersedia. Muat ulang sebelum menyimpan.",
+        409
+      )
+    }
+
     const {
       namaUker,
       alamatUker,
@@ -498,6 +651,13 @@ export async function PUT(request) {
       return createErrorResponse(
         "Data unit kerja tidak ditemukan.",
         404
+      )
+    }
+
+    if (requestedRowVersion !== normalizeRowVersionToken(existingUker.row_version)) {
+      return createErrorResponse(
+        "Data unit kerja telah berubah oleh pengguna lain. Muat ulang sebelum menyimpan.",
+        409
       )
     }
 
@@ -521,9 +681,14 @@ export async function PUT(request) {
       )
     }
 
-    await db
+    const updateResult = await db
       .request()
       .input("id", sql.BigInt, id)
+      .input(
+        "rowVersion",
+        sql.VarBinary(8),
+        Buffer.from(requestedRowVersion.slice(2), "hex")
+      )
       .input("namaUker", sql.NVarChar(100), namaUker)
       .input("alamatUker", sql.NVarChar(255), alamatUker)
       .input("kota", sql.NVarChar(200), kota)
@@ -548,10 +713,31 @@ export async function PUT(request) {
           codeuker = @codeUker,
           updated_at = SYSDATETIME()
         WHERE id = @id
+          AND row_version = @rowVersion
           AND (@scopeCodeUker IS NULL OR codeuker = @scopeCodeUker);
       `)
 
+    if (Number(updateResult.rowsAffected?.[0] || 0) === 0) {
+      return createErrorResponse(
+        "Data unit kerja telah berubah oleh pengguna lain. Muat ulang sebelum menyimpan.",
+        409
+      )
+    }
+
     const updatedUker = await getUkerById(db, id, scope.codeUker)
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "UPDATE",
+      module: "masters.uker",
+      entityType: "master_uker",
+      entityId: id,
+      metadata: {
+        before: existingUker,
+        after: updatedUker,
+      },
+    })
 
     return NextResponse.json({
       success: true,
@@ -574,9 +760,12 @@ export async function PUT(request) {
       )
     }
 
-    return createErrorResponse(
-      "Gagal memperbarui data unit kerja.",
-      500
+    const schemaErrorResponse = createUkerSchemaErrorResponse(error)
+    if (schemaErrorResponse) return schemaErrorResponse
+
+    return createInternalErrorResponse(
+      error,
+      "Gagal memperbarui data unit kerja."
     )
   }
 }
@@ -588,7 +777,7 @@ export async function PUT(request) {
 */
 
 export async function DELETE(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "delete")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -629,6 +818,16 @@ export async function DELETE(request) {
         WHERE id = @id;
       `)
 
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "DELETE",
+      module: "masters.uker",
+      entityType: "master_uker",
+      entityId: id,
+      metadata: { before: existingUker },
+    })
+
     return NextResponse.json({
       success: true,
       message: "Data unit kerja berhasil dihapus.",
@@ -649,9 +848,12 @@ export async function DELETE(request) {
       )
     }
 
-    return createErrorResponse(
-      "Gagal menghapus data unit kerja.",
-      500
+    const schemaErrorResponse = createUkerSchemaErrorResponse(error)
+    if (schemaErrorResponse) return schemaErrorResponse
+
+    return createInternalErrorResponse(
+      error,
+      "Gagal menghapus data unit kerja."
     )
   }
 }

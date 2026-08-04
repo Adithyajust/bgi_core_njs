@@ -2,6 +2,8 @@ import { NextResponse } from "next/server"
 
 import { authorizeApiRequest } from "@/lib/access-control"
 import { connectDB, sql } from "@/lib/mssql"
+import { writeAuditLog } from "@/lib/security/audit-log"
+import { normalizeRowVersionToken } from "@/modules/master-mesin/row-version"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -137,8 +139,8 @@ function getSqlErrorNumber(error) {
   )
 }
 
-async function authorizeMaster(request) {
-  return authorizeApiRequest(request, "/masters")
+async function authorizeMaster(request, action = "view") {
+  return authorizeApiRequest(request, "/masters", action)
 }
 
 function requireSuperAdmin(authorization) {
@@ -206,6 +208,7 @@ async function getById(db, id) {
         k.is_active,
         k.created_at,
         k.updated_at,
+        CONVERT(VARCHAR(18), CONVERT(VARBINARY(8), k.row_version), 1) AS row_version,
         COUNT_BIG(c.id) AS jumlah_tipe,
         SUM(CASE WHEN c.is_active = 1 THEN 1 ELSE 0 END) AS tipe_aktif
       FROM dbo.master_merk k
@@ -218,14 +221,16 @@ async function getById(db, id) {
         k.nama_merk,
         k.is_active,
         k.created_at,
-        k.updated_at;
+        k.updated_at,
+        k.row_version;
     `)
 
-  return result.recordset[0] || null
+  const item = result.recordset[0] || null
+  return item ? { ...item, row_version: normalizeRowVersionToken(item.row_version) } : null
 }
 
 export async function GET(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "view")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -328,7 +333,8 @@ export async function GET(request) {
           k.nama_merk,
           k.is_active,
           k.created_at,
-          k.updated_at
+          k.updated_at,
+          k.row_version
         ORDER BY k.nama_merk ASC, k.id ASC
         OFFSET @offset ROWS
         FETCH NEXT @pageSize ROWS ONLY;
@@ -361,6 +367,7 @@ export async function GET(request) {
           ...item,
           jumlah_tipe: Number(item.jumlah_tipe || 0),
           tipe_aktif: Number(item.tipe_aktif || 0),
+          row_version: normalizeRowVersionToken(item.row_version),
         })),
         pagination: {
           page,
@@ -384,7 +391,7 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "create")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -445,7 +452,18 @@ export async function POST(request) {
         );
       `)
 
-    const created = await getById(db, insertResult.recordset[0].id)
+    const createdId = Number(insertResult.recordset[0].id)
+    const created = await getById(db, createdId)
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "CREATE",
+      module: "masters.merk",
+      entityType: "master_merk",
+      entityId: createdId,
+      metadata: { after: created },
+    })
 
     return NextResponse.json(
       {
@@ -470,7 +488,7 @@ export async function POST(request) {
 }
 
 export async function PUT(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "update")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -503,11 +521,26 @@ export async function PUT(request) {
       return createErrorResponse(validation.error)
     }
 
+    const requestedRowVersion = normalizeRowVersionToken(body.row_version)
+    if (!requestedRowVersion) {
+      return createErrorResponse(
+        "Versi data Merk tidak tersedia. Muat ulang sebelum menyimpan.",
+        409
+      )
+    }
+
     const db = await connectDB()
     const existing = await getById(db, id)
 
     if (!existing) {
       return createErrorResponse("Data Merk tidak ditemukan.", 404)
+    }
+
+    if (requestedRowVersion !== normalizeRowVersionToken(existing.row_version)) {
+      return createErrorResponse(
+        "Data Merk telah berubah oleh pengguna lain. Muat ulang sebelum menyimpan.",
+        409
+      )
     }
 
     const { kodeMerk, namaMerk, isActive } = validation.data
@@ -527,9 +560,14 @@ export async function PUT(request) {
       )
     }
 
-    await db
+    const updateResult = await db
       .request()
       .input("id", sql.Int, id)
+      .input(
+        "rowVersion",
+        sql.VarBinary(8),
+        Buffer.from(requestedRowVersion.slice(2), "hex")
+      )
       .input("kodeMerk", sql.VarChar(30), kodeMerk)
       .input("namaMerk", sql.NVarChar(150), namaMerk)
       .input("isActive", sql.Bit, isActive)
@@ -540,13 +578,36 @@ export async function PUT(request) {
           nama_merk = @namaMerk,
           is_active = @isActive,
           updated_at = SYSDATETIME()
-        WHERE id = @id;
+        WHERE id = @id
+          AND row_version = @rowVersion;
       `)
+
+    if (Number(updateResult.rowsAffected?.[0] || 0) === 0) {
+      return createErrorResponse(
+        "Data Merk telah berubah oleh pengguna lain. Muat ulang sebelum menyimpan.",
+        409
+      )
+    }
+
+    const updated = await getById(db, id)
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "UPDATE",
+      module: "masters.merk",
+      entityType: "master_merk",
+      entityId: id,
+      metadata: {
+        before: existing,
+        after: updated,
+      },
+    })
 
     return NextResponse.json({
       success: true,
       message: "Data Merk berhasil diperbarui.",
-      data: await getById(db, id),
+      data: updated,
     })
   } catch (error) {
     console.error("PUT master merk error:", error)
@@ -563,7 +624,7 @@ export async function PUT(request) {
 }
 
 export async function DELETE(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "delete")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -611,6 +672,16 @@ export async function DELETE(request) {
         DELETE FROM dbo.master_merk
         WHERE id = @id;
       `)
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "DELETE",
+      module: "masters.merk",
+      entityType: "master_merk",
+      entityId: id,
+      metadata: { before: existing },
+    })
 
     return NextResponse.json({
       success: true,

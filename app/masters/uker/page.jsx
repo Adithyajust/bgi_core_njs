@@ -3,6 +3,7 @@
 import Link from "next/link"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
+import { useAppBootstrap } from "@/components/app-bootstrap-context"
 
 const EMPTY_UKER_FORM = {
   codeuker: "",
@@ -14,6 +15,7 @@ const EMPTY_UKER_FORM = {
   gedung_branch: "",
   email: "",
   tanggal_ops: "",
+  row_version: "",
 }
 
 function mapUkerToForm(uker) {
@@ -29,6 +31,7 @@ function mapUkerToForm(uker) {
     tanggal_ops: uker?.tanggal_ops
       ? String(uker.tanggal_ops).slice(0, 10)
       : "",
+    row_version: String(uker?.row_version || ""),
   }
 }
 
@@ -78,8 +81,16 @@ async function readJsonResponse(response) {
   return response.json()
 }
 
-async function fetchCurrentUser(signal) {
-  const response = await fetch("/api/auth/me", {
+async function fetchUkerData({ signal, page, pageSize, search, cityFilter }) {
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  })
+
+  if (search) params.set("search", search)
+  if (cityFilter !== "ALL") params.set("city", cityFilter)
+
+  const response = await fetch(`/api/masters/uker?${params.toString()}`, {
     method: "GET",
     credentials: "include",
     cache: "no-store",
@@ -89,41 +100,27 @@ async function fetchCurrentUser(signal) {
   const result = await readJsonResponse(response)
 
   if (!response.ok || !result.success) {
-    const error = new Error(result.message || "Gagal membaca sesi pengguna.")
+    const error = new Error(result.message || "Gagal mengambil data unit kerja.")
     error.status = response.status
     throw error
   }
 
-  return result.data
-}
-
-async function fetchUkerData(signal) {
-  const response = await fetch(
-    "/api/masters/uker",
-    {
-      method: "GET",
-      credentials: "include",
-      cache: "no-store",
-      signal,
-    }
-  )
-
-  const result = await readJsonResponse(response)
-
-  if (!response.ok || !result.success) {
-    const error = new Error(
-      result.message ||
-        "Gagal mengambil data unit kerja."
-    )
-
-    error.status = response.status
-
-    throw error
+  return {
+    ukers: Array.isArray(result.data?.ukers) ? result.data.ukers : [],
+    pagination: result.data?.pagination || {
+      page,
+      page_size: pageSize,
+      total: 0,
+      total_pages: 1,
+    },
+    summary: result.data?.summary || {
+      total: 0,
+      cityCount: 0,
+      withEmail: 0,
+      operational: 0,
+    },
+    cities: Array.isArray(result.data?.cities) ? result.data.cities : [],
   }
-
-  return Array.isArray(result.data?.ukers)
-    ? result.data.ukers
-    : []
 }
 
 async function createUker(payload) {
@@ -241,9 +238,9 @@ function getErrorMessage(
 
 export default function MasterUkerPage() {
   const router = useRouter()
+  const { user: currentUser } = useAppBootstrap()
 
   const [ukers, setUkers] = useState([])
-  const [currentUser, setCurrentUser] = useState(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] =
     useState(false)
@@ -258,6 +255,20 @@ export default function MasterUkerPage() {
     useState(1)
   const [pageSize, setPageSize] =
     useState(10)
+  const [debouncedSearchText, setDebouncedSearchText] = useState("")
+  const [pagination, setPagination] = useState({
+    page: 1,
+    page_size: 10,
+    total: 0,
+    total_pages: 1,
+  })
+  const [summary, setSummary] = useState({
+    total: 0,
+    cityCount: 0,
+    withEmail: 0,
+    operational: 0,
+  })
+  const [cities, setCities] = useState([])
 
   const toastTimerRef = useRef(null)
 
@@ -283,56 +294,39 @@ export default function MasterUkerPage() {
     message: "",
   })
 
-  async function loadData({
-    signal,
-    isRefresh = false,
-  } = {}) {
+  async function loadData({ signal, isRefresh = false } = {}) {
     try {
-      if (isRefresh) {
-        setRefreshing(true)
-      } else {
-        setLoading(true)
-      }
+      if (isRefresh) setRefreshing(true)
+      else setLoading(true)
 
       setLoadError("")
+      const loadedData = await fetchUkerData({
+        signal,
+        page: currentPage,
+        pageSize,
+        search: debouncedSearchText,
+        cityFilter,
+      })
 
-      const loadedUkers =
-        await fetchUkerData(signal)
-
-      setUkers(loadedUkers)
+      setUkers(loadedData.ukers)
+      setPagination(loadedData.pagination)
+      setSummary(loadedData.summary)
+      setCities(loadedData.cities)
+      if (currentPage > Number(loadedData.pagination.total_pages || 1)) {
+        setCurrentPage(Math.max(1, Number(loadedData.pagination.total_pages || 1)))
+      }
     } catch (error) {
-      if (
-        error?.name === "AbortError"
-      ) {
-        return
-      }
-
+      if (error?.name === "AbortError") return
       if (error?.status === 401) {
-        router.replace(
-          `/login?next=${encodeURIComponent(
-            "/masters/uker"
-          )}`
-        )
-
+        router.replace(`/login?next=${encodeURIComponent("/masters/uker")}`)
         return
       }
-
       if (error?.status === 403) {
         router.replace("/forbidden")
         return
       }
-
-      console.error(
-        "Gagal memuat Master Uker:",
-        error
-      )
-
-      setLoadError(
-        getErrorMessage(
-          error,
-          "Gagal mengambil data unit kerja."
-        )
-      )
+      console.error("Gagal memuat Master Uker:", error)
+      setLoadError(getErrorMessage(error, "Gagal mengambil data unit kerja."))
     } finally {
       if (!signal?.aborted) {
         setLoading(false)
@@ -341,67 +335,53 @@ export default function MasterUkerPage() {
     }
   }
 
- useEffect(() => {
-  const controller = new AbortController()
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchText(searchText.trim())
+    }, 350)
+    return () => window.clearTimeout(timer)
+  }, [searchText])
 
-  async function loadInitialData() {
-    try {
-      const [loadedUkers, loadedUser] = await Promise.all([
-        fetchUkerData(controller.signal),
-        fetchCurrentUser(controller.signal),
-      ])
+  useEffect(() => {
+    const controller = new AbortController()
 
-      if (!controller.signal.aborted) {
-        setUkers(loadedUkers)
-        setCurrentUser(loadedUser)
-      }
-    } catch (error) {
-      if (
-        error?.name === "AbortError" ||
-        controller.signal.aborted
-      ) {
-        return
-      }
+    fetchUkerData({
+      signal: controller.signal,
+      page: currentPage,
+      pageSize,
+      search: debouncedSearchText,
+      cityFilter,
+    })
+      .then((loadedData) => {
+        if (controller.signal.aborted) return
+        setUkers(loadedData.ukers)
+        setPagination(loadedData.pagination)
+        setSummary(loadedData.summary)
+        setCities(loadedData.cities)
+        if (currentPage > Number(loadedData.pagination.total_pages || 1)) {
+          setCurrentPage(Math.max(1, Number(loadedData.pagination.total_pages || 1)))
+        }
+        setLoadError("")
+      })
+      .catch((error) => {
+        if (controller.signal.aborted || error?.name === "AbortError") return
+        if (error?.status === 401) {
+          router.replace(`/login?next=${encodeURIComponent("/masters/uker")}`)
+          return
+        }
+        if (error?.status === 403) {
+          router.replace("/forbidden")
+          return
+        }
+        console.error("Gagal memuat Master Uker:", error)
+        setLoadError(getErrorMessage(error, "Gagal mengambil data unit kerja."))
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false)
+      })
 
-      if (error?.status === 401) {
-        router.replace(
-          `/login?next=${encodeURIComponent(
-            "/masters/uker"
-          )}`
-        )
-
-        return
-      }
-
-      if (error?.status === 403) {
-        router.replace("/forbidden")
-        return
-      }
-
-      console.error(
-        "Gagal memuat Master Uker:",
-        error
-      )
-
-      setLoadError(
-        getErrorMessage(
-          error,
-          "Gagal mengambil data unit kerja."
-        )
-      )
-    } finally {
-      if (!controller.signal.aborted) {
-        setLoading(false)
-      }
-    }
-  }
-
-  void loadInitialData()
-
-  return () => {
-    controller.abort()
-  }
-}, [router])
+    return () => controller.abort()
+  }, [cityFilter, currentPage, debouncedSearchText, pageSize, router])
 
   useEffect(() => {
     return () => {
@@ -471,154 +451,22 @@ export default function MasterUkerPage() {
 
   const isSuperAdmin = currentUser?.roleCode === "SUPER_ADMIN"
 
-  const cities = useMemo(() => {
-    return [
-      ...new Set(
-        ukers
-          .map((uker) =>
-            String(
-              uker.kota || ""
-            ).trim()
-          )
-          .filter(Boolean)
-      ),
-    ].sort((first, second) =>
-      first.localeCompare(
-        second,
-        "id-ID"
-      )
-    )
-  }, [ukers])
-
-  const filteredUkers = useMemo(() => {
-    const keyword = searchText
-      .trim()
-      .toLowerCase()
-
-    return ukers.filter((uker) => {
-      const searchableValues = [
-        uker.codeuker,
-        uker.nama_uker,
-        uker.alamat_uker,
-        uker.kota,
-        uker.kode_pos,
-        uker.telp_branch,
-        uker.gedung_branch,
-        uker.email,
-      ]
-
-      const matchesKeyword =
-        !keyword ||
-        searchableValues.some((value) =>
-          String(value || "")
-            .toLowerCase()
-            .includes(keyword)
-        )
-
-      const matchesCity =
-        cityFilter === "ALL" ||
-        String(uker.kota || "") ===
-          cityFilter
-
-      return (
-        matchesKeyword &&
-        matchesCity
-      )
-    })
-  }, [
-    cityFilter,
-    searchText,
-    ukers,
-  ])
-
-  const totalPages = Math.max(
-    1,
-    Math.ceil(
-      filteredUkers.length / pageSize
-    )
-  )
-
-  // Batasi halaman aktif secara turunan tanpa memanggil setState di dalam effect.
-  const activePage = Math.min(
-    currentPage,
-    totalPages
-  )
-
-  const paginatedUkers = useMemo(() => {
-    const startIndex =
-      (activePage - 1) * pageSize
-
-    return filteredUkers.slice(
-      startIndex,
-      startIndex + pageSize
-    )
-  }, [
-    activePage,
-    filteredUkers,
-    pageSize,
-  ])
+  const filteredUkers = ukers
+  const paginatedUkers = ukers
+  const totalPages = Math.max(1, Number(pagination.total_pages || 1))
+  const activePage = Math.min(currentPage, totalPages)
 
   const paginationPages = useMemo(() => {
     const visiblePageCount = 5
-    let startPage = Math.max(
-      1,
-      activePage - 2
-    )
-    let endPage = Math.min(
-      totalPages,
-      startPage +
-        visiblePageCount -
-        1
-    )
-
-    startPage = Math.max(
-      1,
-      endPage -
-        visiblePageCount +
-        1
-    )
+    let startPage = Math.max(1, activePage - 2)
+    let endPage = Math.min(totalPages, startPage + visiblePageCount - 1)
+    startPage = Math.max(1, endPage - visiblePageCount + 1)
 
     return Array.from(
-      {
-        length:
-          endPage - startPage + 1,
-      },
-      (_, index) =>
-        startPage + index
+      { length: endPage - startPage + 1 },
+      (_, index) => startPage + index
     )
   }, [activePage, totalPages])
-
-  const summary = useMemo(() => {
-    const cityCount = new Set(
-      ukers
-        .map((uker) =>
-          String(
-            uker.kota || ""
-          ).trim()
-        )
-        .filter(Boolean)
-    ).size
-
-    return {
-      total: ukers.length,
-
-      cityCount,
-
-      withEmail: ukers.filter(
-        (uker) =>
-          Boolean(
-            String(
-              uker.email || ""
-            ).trim()
-          )
-      ).length,
-
-      operational: ukers.filter(
-        (uker) =>
-          Boolean(uker.tanggal_ops)
-      ).length,
-    }
-  }, [ukers])
 
   function showToast(type, message) {
     if (toastTimerRef.current) {
@@ -735,6 +583,7 @@ export default function MasterUkerPage() {
       const result = editingId
         ? await updateUker({
             id: editingId,
+            row_version: form.row_version,
             ...payload,
           })
         : await createUker(payload)
@@ -1052,7 +901,7 @@ export default function MasterUkerPage() {
                     colSpan={8}
                     className="user-role-empty"
                   >
-                    {ukers.length === 0
+                    {summary.total === 0
                       ? "Belum ada data unit kerja."
                       : "Tidak ada data yang sesuai dengan pencarian."}
                   </td>

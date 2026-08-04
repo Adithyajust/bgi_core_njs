@@ -3,6 +3,20 @@
 import Link from "next/link"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
+import { useAppBootstrap } from "@/components/app-bootstrap-context"
+
+const JABATAN_OPTIONS = [
+  "Superadmin",
+  "Pinca",
+  "Manager Operasional",
+  "Asisten Manager CRO",
+  "Asisten Manager CPC",
+  "Teknisi",
+  "Internal Control",
+  "General Affair",
+  "Custody",
+  "Driver",
+]
 
 const EMPTY_PEGAWAI_FORM = {
   nip: "",
@@ -18,6 +32,7 @@ const EMPTY_PEGAWAI_FORM = {
   tgl_job: "",
   foto: "",
   uker_id: "",
+  row_version: "",
 }
 
 const PEGAWAI_PHOTO_MAX_BYTES = 2 * 1024 * 1024
@@ -38,6 +53,7 @@ function mapPegawaiToForm(pegawai) {
     tgl_job: pegawai?.tgl_job ? String(pegawai.tgl_job).slice(0, 10) : "",
     foto: String(pegawai?.foto || ""),
     uker_id: String(pegawai?.uker_id || ""),
+    row_version: String(pegawai?.row_version || ""),
   }
 }
 
@@ -109,19 +125,51 @@ async function requestJson(url, options = {}) {
   return result
 }
 
-async function fetchInitialData(signal) {
-  const [pegawaiResult, ukerResult, userResult] = await Promise.all([
-    requestJson("/api/masters/pegawai", { method: "GET", signal }),
-    requestJson("/api/masters/uker", { method: "GET", signal }),
-    requestJson("/api/auth/me", { method: "GET", signal }),
+async function fetchInitialData({
+  signal,
+  page,
+  pageSize,
+  search,
+  ukerFilter,
+  statusFilter,
+}) {
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  })
+
+  if (search) params.set("search", search)
+  if (ukerFilter !== "ALL") params.set("uker_id", ukerFilter)
+  if (statusFilter !== "ALL") params.set("status", statusFilter)
+
+  const [pegawaiResult, ukerResult] = await Promise.all([
+    requestJson(`/api/masters/pegawai?${params.toString()}`, {
+      method: "GET",
+      signal,
+    }),
+    requestJson("/api/masters/uker?mode=options", {
+      method: "GET",
+      signal,
+    }),
   ])
 
   return {
     pegawai: Array.isArray(pegawaiResult.data?.pegawai)
       ? pegawaiResult.data.pegawai
       : [],
+    pagination: pegawaiResult.data?.pagination || {
+      page,
+      page_size: pageSize,
+      total: 0,
+      total_pages: 1,
+    },
+    summary: pegawaiResult.data?.summary || {
+      total: 0,
+      active: 0,
+      linked: 0,
+      withoutEmail: 0,
+    },
     ukers: Array.isArray(ukerResult.data?.ukers) ? ukerResult.data.ukers : [],
-    currentUser: userResult.data || null,
   }
 }
 
@@ -153,13 +201,13 @@ function getErrorMessage(error, fallbackMessage) {
 
 export default function MasterPegawaiPage() {
   const router = useRouter()
+  const { user: currentUser } = useAppBootstrap()
   const toastTimerRef = useRef(null)
   const photoInputRef = useRef(null)
   const photoObjectUrlRef = useRef(null)
 
   const [pegawai, setPegawai] = useState([])
   const [ukers, setUkers] = useState([])
-  const [currentUser, setCurrentUser] = useState(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [loadError, setLoadError] = useState("")
@@ -169,6 +217,19 @@ export default function MasterPegawaiPage() {
   const [statusFilter, setStatusFilter] = useState("ALL")
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
+  const [debouncedSearchText, setDebouncedSearchText] = useState("")
+  const [pagination, setPagination] = useState({
+    page: 1,
+    page_size: 10,
+    total: 0,
+    total_pages: 1,
+  })
+  const [summary, setSummary] = useState({
+    total: 0,
+    active: 0,
+    linked: 0,
+    withoutEmail: 0,
+  })
 
   const [modalOpen, setModalOpen] = useState(false)
   const [editingId, setEditingId] = useState(null)
@@ -230,10 +291,23 @@ export default function MasterPegawaiPage() {
 
       setLoadError("")
 
-      const loadedData = await fetchInitialData(signal)
+      const loadedData = await fetchInitialData({
+        signal,
+        page: currentPage,
+        pageSize,
+        search: debouncedSearchText,
+        ukerFilter,
+        statusFilter,
+      })
+
       setPegawai(loadedData.pegawai)
       setUkers(loadedData.ukers)
-      setCurrentUser(loadedData.currentUser)
+      setPagination(loadedData.pagination)
+      setSummary(loadedData.summary)
+
+      if (loadedData.pagination.page > loadedData.pagination.total_pages) {
+        setCurrentPage(loadedData.pagination.total_pages)
+      }
     } catch (error) {
       if (error?.name === "AbortError") return
 
@@ -258,40 +332,54 @@ export default function MasterPegawaiPage() {
   }
 
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchText(searchText.trim())
+    }, 350)
+
+    return () => window.clearTimeout(timer)
+  }, [searchText])
+
+  useEffect(() => {
     const controller = new AbortController()
 
-    fetchInitialData(controller.signal)
+    fetchInitialData({
+      signal: controller.signal,
+      page: currentPage,
+      pageSize,
+      search: debouncedSearchText,
+      ukerFilter,
+      statusFilter,
+    })
       .then((loadedData) => {
         if (controller.signal.aborted) return
-
         setPegawai(loadedData.pegawai)
         setUkers(loadedData.ukers)
-        setCurrentUser(loadedData.currentUser)
+        setPagination(loadedData.pagination)
+        setSummary(loadedData.summary)
+        if (currentPage > Number(loadedData.pagination.total_pages || 1)) {
+          setCurrentPage(Math.max(1, Number(loadedData.pagination.total_pages || 1)))
+        }
+        setLoadError("")
       })
       .catch((error) => {
         if (error?.name === "AbortError" || controller.signal.aborted) return
-
         if (error?.status === 401) {
           router.replace(`/login?next=${encodeURIComponent("/masters/pegawai")}`)
           return
         }
-
         if (error?.status === 403) {
           router.replace("/forbidden")
           return
         }
-
         console.error("Gagal memuat master pegawai:", error)
         setLoadError(getErrorMessage(error, "Gagal mengambil data pegawai."))
       })
       .finally(() => {
-        if (!controller.signal.aborted) {
-          setLoading(false)
-        }
+        if (!controller.signal.aborted) setLoading(false)
       })
 
     return () => controller.abort()
-  }, [router])
+  }, [currentPage, debouncedSearchText, pageSize, router, statusFilter, ukerFilter])
 
   useEffect(() => {
     return () => {
@@ -339,49 +427,10 @@ export default function MasterPegawaiPage() {
     }
   }, [deleteTarget, deleting, modalOpen, saving])
 
-  const filteredPegawai = useMemo(() => {
-    const keyword = searchText.trim().toLowerCase()
-
-    return pegawai.filter((item) => {
-      const searchableValues = [
-        item.nip,
-        item.ktp,
-        item.nama,
-        item.alamat,
-        item.jabatan,
-        item.handphone,
-        item.email,
-        item.status_peg,
-        item.codeuker,
-        item.nama_uker,
-        item.username,
-      ]
-
-      const matchesKeyword =
-        !keyword ||
-        searchableValues.some((value) =>
-          String(value || "").toLowerCase().includes(keyword)
-        )
-
-      const matchesUker =
-        ukerFilter === "ALL" || String(item.uker_id) === String(ukerFilter)
-
-      const matchesStatus =
-        statusFilter === "ALL" ||
-        (statusFilter === "ACTIVE" && Boolean(item.status)) ||
-        (statusFilter === "INACTIVE" && !Boolean(item.status))
-
-      return matchesKeyword && matchesUker && matchesStatus
-    })
-  }, [pegawai, searchText, statusFilter, ukerFilter])
-
-  const totalPages = Math.max(1, Math.ceil(filteredPegawai.length / pageSize))
+  const filteredPegawai = pegawai
+  const paginatedPegawai = pegawai
+  const totalPages = Math.max(1, Number(pagination.total_pages || 1))
   const activePage = Math.min(currentPage, totalPages)
-
-  const paginatedPegawai = useMemo(() => {
-    const startIndex = (activePage - 1) * pageSize
-    return filteredPegawai.slice(startIndex, startIndex + pageSize)
-  }, [activePage, filteredPegawai, pageSize])
 
   const paginationPages = useMemo(() => {
     const visiblePageCount = 5
@@ -394,15 +443,6 @@ export default function MasterPegawaiPage() {
       (_, index) => startPage + index
     )
   }, [activePage, totalPages])
-
-  const summary = useMemo(() => {
-    return {
-      total: pegawai.length,
-      active: pegawai.filter((item) => Boolean(item.status)).length,
-      linked: pegawai.filter((item) => Boolean(item.user_id)).length,
-      withoutEmail: pegawai.filter((item) => !String(item.email || "").trim()).length,
-    }
-  }, [pegawai])
 
   function resetFilters() {
     setSearchText("")
@@ -509,6 +549,7 @@ export default function MasterPegawaiPage() {
       payload.set("tgl_lahir", form.tgl_lahir)
       payload.set("tgl_job", form.tgl_job)
       payload.set("uker_id", form.uker_id)
+      if (editingId) payload.set("row_version", form.row_version)
       payload.set("remove_photo", String(removePhoto))
 
       if (photoFile) {
@@ -834,7 +875,7 @@ export default function MasterPegawaiPage() {
                     colSpan={9}
                     className="user-role-empty"
                   >
-                    {pegawai.length === 0
+                    {summary.total === 0
                       ? "Belum ada data pegawai."
                       : "Tidak ada data yang sesuai dengan pencarian."}
                   </td>
@@ -1334,14 +1375,22 @@ export default function MasterPegawaiPage() {
                     Jabatan
                   </label>
 
-                  <input
+                  <select
                     id="jabatan"
                     name="jabatan"
                     value={form.jabatan}
                     onChange={handleFormInput}
-                    maxLength={100}
-                    placeholder="Jabatan pegawai"
-                  />
+                  >
+                    <option value="">
+                      Pilih jabatan
+                    </option>
+
+                    {JABATAN_OPTIONS.map((jabatan) => (
+                      <option key={jabatan} value={jabatan}>
+                        {jabatan}
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
                 <div className="user-role-form-field">

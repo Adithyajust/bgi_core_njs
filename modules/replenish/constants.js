@@ -1,0 +1,76 @@
+export const REPLENISH_ACTIVITY_TYPES = Object.freeze([
+  "NORMAL",
+  "PENGOSONGAN",
+  "PERDANA",
+])
+
+export const REPLENISH_PRIORITIES = Object.freeze([
+  "RENDAH",
+  "NORMAL",
+  "TINGGI",
+  "DARURAT",
+])
+
+export const REPLENISH_TEAM_ROLES = Object.freeze([
+  "CUSTODY",
+  "PENGEMUDI",
+])
+
+export const REPLENISH_WORK_ORDER_STATUSES = Object.freeze([
+  "DRAFT",
+  "MENUNGGU_PERSETUJUAN_TIM",
+  "DITOLAK",
+  "DISETUJUI",
+  "MENUNGGU_VALIDASI_KASET",
+  "KASET_DALAM_PERSIAPAN",
+  "KASET_SIAP",
+  "MENUNGGU_PENYERAHAN_KUNCI",
+  "SIAP_BERANGKAT",
+  "BERANGKAT",
+  "DALAM_PERJALANAN",
+  "TIBA_DI_LOKASI",
+  "MENUNGGU_KODE_KOMBINASI",
+  "DALAM_PROSES_REPLENISH",
+  "SELESAI_DI_LOKASI",
+  "BERHASIL_SEBAGIAN",
+  "GAGAL",
+  "DALAM_PERJALANAN_KEMBALI",
+  "TIBA_DI_KANTOR",
+  "MENUNGGU_PENGEMBALIAN_KUNCI",
+  "MENUNGGU_PENERIMAAN_KASET",
+  "DALAM_PENGHITUNGAN_CPC",
+  "DALAM_REKONSILIASI",
+  "TERDAPAT_SELISIH",
+  "DALAM_INVESTIGASI",
+  "SELESAI",
+  "DITUTUP",
+  "DIBATALKAN",
+])
+
+export const REPLENISH_POINT_STATUSES = Object.freeze([
+  "TERJADWAL",
+  "DALAM_PERJALANAN",
+  "TIBA",
+  "DALAM_PROSES",
+  "BERHASIL",
+  "BERHASIL_DENGAN_CATATAN",
+  "GAGAL",
+  "DITUNDA",
+  "DIBATALKAN",
+])
+
+export const REPLENISH_ACTIONS = Object.freeze({
+  SUBMIT: "SUBMIT",
+  APPROVE: "APPROVE",
+  REJECT: "REJECT",
+  CANCEL: "CANCEL",
+})
+
+// Setelah diajukan, maker tidak boleh menarik kembali work order dari antrian
+// checker. Pembatalan baru dapat dilakukan kembali setelah checker menolak.
+export const REPLENISH_MAKER_CANCELLABLE_STATUSES = Object.freeze([
+  "DRAFT",
+  "DITOLAK",
+])
+
+export const MAX_REPLENISH_POINTS = 50

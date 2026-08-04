@@ -3,11 +3,13 @@
 import Link from "next/link"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
+import { useAppBootstrap } from "@/components/app-bootstrap-context"
 
 const EMPTY_FORM = {
   kode_kanwil: "",
   nama_kanwil: "",
   is_active: true,
+  row_version: "",
 }
 
 function formatDateTime(value) {
@@ -62,6 +64,7 @@ function mapToForm(item) {
     kode_kanwil: String(item?.kode_kanwil || ""),
     nama_kanwil: String(item?.nama_kanwil || ""),
     is_active: Boolean(item?.is_active),
+    row_version: String(item?.row_version || ""),
   }
 }
 
@@ -71,9 +74,9 @@ function getErrorMessage(error, fallback) {
 
 export default function MasterKanwilPage() {
   const router = useRouter()
+  const { user: currentUser } = useAppBootstrap()
   const toastTimerRef = useRef(null)
 
-  const [currentUser, setCurrentUser] = useState(null)
   const [kanwils, setKanwils] = useState([])
   const [summary, setSummary] = useState({
     total: 0,
@@ -115,40 +118,6 @@ export default function MasterKanwilPage() {
   })
 
   const isSuperAdmin = currentUser?.roleCode === "SUPER_ADMIN"
-
-  useEffect(() => {
-    const controller = new AbortController()
-
-    async function loadCurrentUser() {
-      try {
-        const result = await requestJson("/api/auth/me", {
-          method: "GET",
-          signal: controller.signal,
-        })
-
-        if (!controller.signal.aborted) {
-          setCurrentUser(result.data)
-        }
-      } catch (error) {
-        if (error?.name === "AbortError") {
-          return
-        }
-
-        if (error?.status === 401) {
-          router.replace(`/login?next=${encodeURIComponent("/masters/kanwil")}`)
-          return
-        }
-
-        if (error?.status === 403) {
-          router.replace("/forbidden")
-        }
-      }
-    }
-
-    void loadCurrentUser()
-
-    return () => controller.abort()
-  }, [router])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -349,6 +318,7 @@ export default function MasterKanwilPage() {
         kode_kanwil: form.kode_kanwil.trim().toUpperCase(),
         nama_kanwil: form.nama_kanwil.trim(),
         is_active: form.is_active,
+        row_version: form.row_version,
       }
 
       const result = await requestJson("/api/masters/kanwil", {

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server"
 
 import { authorizeApiRequest } from "@/lib/access-control"
 import { connectDB, sql } from "@/lib/mssql"
+import { writeAuditLog } from "@/lib/security/audit-log"
+import { normalizeRowVersionToken } from "@/modules/master-mesin/row-version"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -131,8 +133,8 @@ function getSqlErrorNumber(error) {
   )
 }
 
-async function authorizeMaster(request) {
-  return authorizeApiRequest(request, "/masters")
+async function authorizeMaster(request, action = "view") {
+  return authorizeApiRequest(request, "/masters", action)
 }
 
 function requireSuperAdmin(authorization) {
@@ -208,6 +210,7 @@ async function getById(db, id) {
         c.jenis_mesin,
         c.nama_model,
         c.is_active,
+        c.row_version,
         c.created_at,
         c.updated_at
       FROM dbo.master_tipe_mesin c
@@ -216,11 +219,14 @@ async function getById(db, id) {
       WHERE c.id = @id;
     `)
 
-  return result.recordset[0] || null
+  const item = result.recordset[0] || null
+  return item
+    ? { ...item, row_version: normalizeRowVersionToken(item.row_version) }
+    : null
 }
 
 export async function GET(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "view")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -336,6 +342,7 @@ export async function GET(request) {
           c.jenis_mesin,
           c.nama_model,
           c.is_active,
+          c.row_version,
           c.created_at,
           c.updated_at
         FROM dbo.master_tipe_mesin c
@@ -369,7 +376,10 @@ export async function GET(request) {
     return NextResponse.json({
       success: true,
       data: {
-        tipeMesins: listResult.recordset,
+        tipeMesins: listResult.recordset.map((item) => ({
+          ...item,
+          row_version: normalizeRowVersionToken(item.row_version),
+        })),
         pagination: {
           page,
           page_size: pageSize,
@@ -392,7 +402,7 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "create")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -469,7 +479,18 @@ export async function POST(request) {
         );
       `)
 
-    const created = await getById(db, insertResult.recordset[0].id)
+    const createdId = Number(insertResult.recordset[0].id)
+    const created = await getById(db, createdId)
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "CREATE",
+      module: "masters.tipe_mesin",
+      entityType: "master_tipe_mesin",
+      entityId: createdId,
+      metadata: { after: created },
+    })
 
     return NextResponse.json(
       {
@@ -498,7 +519,7 @@ export async function POST(request) {
 }
 
 export async function PUT(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "update")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -531,11 +552,26 @@ export async function PUT(request) {
       return createErrorResponse(validation.error)
     }
 
+    const requestedRowVersion = normalizeRowVersionToken(body.row_version)
+    if (!requestedRowVersion) {
+      return createErrorResponse(
+        "Versi data Tipe Mesin tidak tersedia. Muat ulang sebelum menyimpan.",
+        409
+      )
+    }
+
     const db = await connectDB()
     const existing = await getById(db, id)
 
     if (!existing) {
       return createErrorResponse("Data Tipe Mesin tidak ditemukan.", 404)
+    }
+
+    if (requestedRowVersion !== normalizeRowVersionToken(existing.row_version)) {
+      return createErrorResponse(
+        "Data Tipe Mesin telah berubah oleh pengguna lain. Muat ulang sebelum menyimpan.",
+        409
+      )
     }
 
     const { merkId, jenisMesin, namaModel, isActive } = validation.data
@@ -564,9 +600,14 @@ export async function PUT(request) {
       )
     }
 
-    await db
+    const updateResult = await db
       .request()
       .input("id", sql.Int, id)
+      .input(
+        "rowVersion",
+        sql.VarBinary(8),
+        Buffer.from(requestedRowVersion.slice(2), "hex")
+      )
       .input("merkId", sql.Int, merkId)
       .input("jenisMesin", sql.NVarChar(100), jenisMesin)
       .input("namaModel", sql.NVarChar(150), namaModel)
@@ -579,13 +620,36 @@ export async function PUT(request) {
           nama_model = @namaModel,
           is_active = @isActive,
           updated_at = SYSDATETIME()
-        WHERE id = @id;
+        WHERE id = @id
+          AND row_version = @rowVersion;
       `)
+
+    if (Number(updateResult.rowsAffected?.[0] || 0) === 0) {
+      return createErrorResponse(
+        "Data Tipe Mesin telah berubah oleh pengguna lain. Muat ulang sebelum menyimpan.",
+        409
+      )
+    }
+
+    const updated = await getById(db, id)
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "UPDATE",
+      module: "masters.tipe_mesin",
+      entityType: "master_tipe_mesin",
+      entityId: id,
+      metadata: {
+        before: existing,
+        after: updated,
+      },
+    })
 
     return NextResponse.json({
       success: true,
       message: "Data Tipe Mesin berhasil diperbarui.",
-      data: await getById(db, id),
+      data: updated,
     })
   } catch (error) {
     console.error("PUT master tipe mesin error:", error)
@@ -606,7 +670,7 @@ export async function PUT(request) {
 }
 
 export async function DELETE(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "delete")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -647,6 +711,16 @@ export async function DELETE(request) {
         DELETE FROM dbo.master_tipe_mesin
         WHERE id = @id;
       `)
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "DELETE",
+      module: "masters.tipe_mesin",
+      entityType: "master_tipe_mesin",
+      entityId: id,
+      metadata: { before: existing },
+    })
 
     return NextResponse.json({
       success: true,

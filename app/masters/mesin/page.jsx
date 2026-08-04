@@ -3,35 +3,66 @@
 import Link from "next/link"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
+import { useAppBootstrap } from "@/components/app-bootstrap-context"
+
+import {
+  validateMachineImportRows,
+} from "@/modules/master-mesin/import-validation"
+import {
+  getRowVersionToken,
+  normalizeRowVersionToken,
+} from "@/modules/master-mesin/row-version"
+import {
+  parseMachineSpreadsheet,
+} from "@/modules/master-mesin/spreadsheet-parser"
 
 const FALLBACK_CATEGORIES = [
   "ALFAMART",
   "ALFAMIDI",
   "APARTEMEN",
+  "APOTEK",
   "BANDARA",
+  "BIKE THRU",
+  "BRI AGRO",
+  "DRIVE THRU",
+  "GTI",
   "HOTEL",
   "INDOMARET",
   "INSTANSI BUMN/BUMD",
   "INSTANSI MILITER",
   "INSTANSI PEMERINTAHAN",
+  "KANINS",
+  "KANTOR PUSAT",
+  "KANWIL",
   "KC",
   "KCP",
   "KEPOLISIAN",
   "KK",
+  "KLINIK",
   "MALL",
   "MINI MARKET",
+  "PABRIK",
+  "PANGKALAN MILITER",
   "PASAR",
+  "PELABUHAN",
   "PERKANTORAN",
+  "PERKEBUNAN",
+  "PERTAMBANGAN",
+  "PERTOKOAN",
   "PERUMAHAN",
   "PLAZA",
+  "RUMAH MAKAN",
   "RUMAH SAKIT",
   "SPBU",
   "STASIUN",
   "SWALAYAN",
   "TEMPAT HIBURAN",
+  "TEMPAT IBADAH",
   "TEMPAT OLAHRAGA",
   "TEMPAT PENDIDIKAN",
   "TEMPAT WISATA",
+  "TERAS BRI",
+  "TERMINAL",
   "UNIT BRI",
 ]
 
@@ -44,11 +75,14 @@ const FALLBACK_OPERATION_TIMES = [
   "06:00 - 15:00",
   "06:00 - 18:00",
   "06:00 - 21:00",
+  "09:00 - 15:00",
   "09:00 - 18:00",
   "09:00 - 21:00",
 ]
 
 const EMPTY_FORM = {
+  row_version: "",
+  updated_at: "",
   tid: "",
   sn: "",
   db: "",
@@ -118,6 +152,7 @@ async function requestJson(url, options = {}) {
   if (!response.ok || !result.success) {
     const error = new Error(result.message || "Permintaan gagal diproses.")
     error.status = response.status
+    error.payload = result
     throw error
   }
 
@@ -128,8 +163,17 @@ function getErrorMessage(error, fallback) {
   return error instanceof Error ? error.message : fallback
 }
 
+function formatFileSize(size) {
+  const bytes = Number(size || 0)
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
 function mapToForm(item) {
   return {
+    row_version: getRowVersionToken(item),
+    updated_at: String(item?.updated_at || ""),
     tid: String(item?.tid || ""),
     sn: String(item?.sn || ""),
     db: String(item?.db || ""),
@@ -156,13 +200,6 @@ function mapToForm(item) {
   }
 }
 
-function getPageNumbers(currentPage, totalPages) {
-  const safeTotal = Math.max(1, totalPages)
-  const start = Math.max(1, Math.min(currentPage - 2, safeTotal - 4))
-  const end = Math.min(safeTotal, start + 4)
-
-  return Array.from({ length: end - start + 1 }, (_, index) => start + index)
-}
 
 
 function AutocompleteSelect({
@@ -177,27 +214,25 @@ function AutocompleteSelect({
   className = "",
 }) {
   const rootRef = useRef(null)
-  const typingRef = useRef(false)
   const selectedOption = useMemo(
     () => options.find((option) => String(option.value) === String(value)) || null,
     [options, value]
   )
-  const [query, setQuery] = useState(selectedOption?.label || "")
+  const [draftQuery, setDraftQuery] = useState("")
+  const [isEditing, setIsEditing] = useState(false)
   const [open, setOpen] = useState(false)
   const [highlightedIndex, setHighlightedIndex] = useState(0)
 
-  useEffect(() => {
-    if (typingRef.current) {
-      return
-    }
-
-    setQuery(selectedOption?.label || "")
-  }, [selectedOption?.label])
+  const inputValue = isEditing
+    ? draftQuery
+    : selectedOption?.label || ""
 
   const filteredOptions = useMemo(() => {
-    const normalizedQuery = query.trim().toLocaleLowerCase("id-ID")
+    const normalizedQuery = isEditing
+      ? draftQuery.trim().toLocaleLowerCase("id-ID")
+      : ""
 
-    if (!normalizedQuery || query === selectedOption?.label) {
+    if (!normalizedQuery) {
       return options
     }
 
@@ -206,33 +241,33 @@ function AutocompleteSelect({
         .toLocaleLowerCase("id-ID")
       return haystack.includes(normalizedQuery)
     })
-  }, [options, query, selectedOption?.label])
+  }, [draftQuery, isEditing, options])
 
   useEffect(() => {
     function handleOutsideClick(event) {
       if (rootRef.current && !rootRef.current.contains(event.target)) {
-        typingRef.current = false
+        setIsEditing(false)
+        setDraftQuery("")
         setOpen(false)
-        setQuery(selectedOption?.label || "")
       }
     }
 
     document.addEventListener("mousedown", handleOutsideClick)
     return () => document.removeEventListener("mousedown", handleOutsideClick)
-  }, [selectedOption?.label])
+  }, [])
 
   function selectOption(option) {
-    typingRef.current = false
     onChange(String(option.value))
-    setQuery(option.label)
+    setIsEditing(false)
+    setDraftQuery("")
     setOpen(false)
     setHighlightedIndex(0)
   }
 
   function handleInputChange(event) {
     const nextQuery = event.target.value
-    typingRef.current = true
-    setQuery(nextQuery)
+    setIsEditing(true)
+    setDraftQuery(nextQuery)
     setOpen(true)
     setHighlightedIndex(0)
 
@@ -275,9 +310,9 @@ function AutocompleteSelect({
 
     if (event.key === "Escape") {
       event.preventDefault()
-      typingRef.current = false
+      setIsEditing(false)
+      setDraftQuery("")
       setOpen(false)
-      setQuery(selectedOption?.label || "")
     }
   }
 
@@ -300,7 +335,7 @@ function AutocompleteSelect({
         <input
           id={id}
           type="text"
-          value={query}
+          value={inputValue}
           onChange={handleInputChange}
           onFocus={() => {
             setOpen(true)
@@ -328,9 +363,9 @@ function AutocompleteSelect({
             className="machine-autocomplete-clear"
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => {
-              typingRef.current = false
               onChange("")
-              setQuery("")
+              setIsEditing(true)
+              setDraftQuery("")
               setHighlightedIndex(0)
               setOpen(true)
             }}
@@ -414,7 +449,6 @@ function AutocompleteSelect({
   )
 }
 
-
 function mergeAutocompleteOptions(...groups) {
   const optionMap = new Map()
 
@@ -449,18 +483,10 @@ function AsyncAutocompleteSelect({
   limit = 20,
 }) {
   const rootRef = useRef(null)
-  const typingRef = useRef(false)
   const requestSequenceRef = useRef(0)
-  const [selectedOption, setSelectedOption] = useState(
-    initialOption && String(initialOption.value) === String(value)
-      ? { ...initialOption, value: String(initialOption.value) }
-      : null
-  )
-  const [query, setQuery] = useState(
-    initialOption && String(initialOption.value) === String(value)
-      ? initialOption.label
-      : ""
-  )
+  const [selectedOption, setSelectedOption] = useState(null)
+  const [draftQuery, setDraftQuery] = useState("")
+  const [isEditing, setIsEditing] = useState(false)
   const [options, setOptions] = useState([])
   const [open, setOpen] = useState(false)
   const [highlightedIndex, setHighlightedIndex] = useState(0)
@@ -470,51 +496,46 @@ function AsyncAutocompleteSelect({
   const [nextCursor, setNextCursor] = useState(null)
   const [hasMore, setHasMore] = useState(false)
 
-  const selectedValue = selectedOption ? String(selectedOption.value) : ""
   const normalizedValue = value ? String(value) : ""
-  const searchTerm = typingRef.current ? query.trim() : ""
-
-  useEffect(() => {
-    if (!normalizedValue) {
-      setSelectedOption(null)
-
-      if (!typingRef.current) {
-        setQuery("")
-      }
-      return
-    }
-
+  const normalizedInitialOption = useMemo(() => {
     if (
-      initialOption &&
-      String(initialOption.value) === normalizedValue &&
-      selectedValue !== normalizedValue
+      !normalizedValue ||
+      !initialOption ||
+      String(initialOption.value) !== normalizedValue
     ) {
-      const normalizedInitialOption = {
-        ...initialOption,
-        value: normalizedValue,
-      }
-      typingRef.current = false
-      setSelectedOption(normalizedInitialOption)
-      setQuery(normalizedInitialOption.label)
+      return null
     }
-  }, [
-    initialOption,
-    normalizedValue,
-    selectedValue,
-  ])
+
+    return {
+      ...initialOption,
+      value: normalizedValue,
+    }
+  }, [initialOption, normalizedValue])
+  const normalizedSelectedOption =
+    selectedOption && String(selectedOption.value) === normalizedValue
+      ? selectedOption
+      : null
+  const resolvedSelectedOption =
+    normalizedSelectedOption || normalizedInitialOption
+  const selectedValue = resolvedSelectedOption
+    ? String(resolvedSelectedOption.value)
+    : ""
+  const selectedLabel = resolvedSelectedOption?.label || ""
+  const inputValue = isEditing ? draftQuery : selectedLabel
+  const searchTerm = isEditing ? draftQuery.trim() : ""
 
   useEffect(() => {
     function handleOutsideClick(event) {
       if (rootRef.current && !rootRef.current.contains(event.target)) {
-        typingRef.current = false
+        setIsEditing(false)
+        setDraftQuery("")
         setOpen(false)
-        setQuery(selectedOption?.label || "")
       }
     }
 
     document.addEventListener("mousedown", handleOutsideClick)
     return () => document.removeEventListener("mousedown", handleOutsideClick)
-  }, [selectedOption?.label])
+  }, [])
 
   useEffect(() => {
     const needsSelectedLookup = Boolean(
@@ -528,7 +549,7 @@ function AsyncAutocompleteSelect({
     const controller = new AbortController()
     const requestId = requestSequenceRef.current + 1
     requestSequenceRef.current = requestId
-    const delay = typingRef.current ? 300 : 0
+    const delay = isEditing ? 300 : 0
 
     const timer = window.setTimeout(async () => {
       try {
@@ -585,15 +606,10 @@ function AsyncAutocompleteSelect({
           normalizedValue &&
           String(resultSelected.value) === normalizedValue
         ) {
-          const normalizedSelected = {
+          setSelectedOption({
             ...resultSelected,
             value: normalizedValue,
-          }
-          setSelectedOption(normalizedSelected)
-
-          if (!typingRef.current) {
-            setQuery(normalizedSelected.label)
-          }
+          })
         }
       } catch (fetchError) {
         if (fetchError?.name === "AbortError") {
@@ -622,6 +638,7 @@ function AsyncAutocompleteSelect({
   }, [
     disabled,
     emptyOptionLabel,
+    isEditing,
     limit,
     normalizedValue,
     open,
@@ -680,27 +697,26 @@ function AsyncAutocompleteSelect({
     }
 
     const nextValue = String(option?.value || "")
-    typingRef.current = false
 
     if (!nextValue) {
       setSelectedOption(null)
-      setQuery("")
       onChange("", null)
     } else {
       const normalizedOption = { ...option, value: nextValue }
       setSelectedOption(normalizedOption)
-      setQuery(normalizedOption.label)
       onChange(nextValue, normalizedOption)
     }
 
+    setIsEditing(false)
+    setDraftQuery("")
     setOpen(false)
     setHighlightedIndex(0)
   }
 
   function handleInputChange(event) {
     const nextQuery = event.target.value
-    typingRef.current = true
-    setQuery(nextQuery)
+    setIsEditing(true)
+    setDraftQuery(nextQuery)
     setOpen(true)
     setHighlightedIndex(0)
 
@@ -744,9 +760,9 @@ function AsyncAutocompleteSelect({
 
     if (event.key === "Escape") {
       event.preventDefault()
-      typingRef.current = false
+      setIsEditing(false)
+      setDraftQuery("")
       setOpen(false)
-      setQuery(selectedOption?.label || "")
     }
   }
 
@@ -770,7 +786,7 @@ function AsyncAutocompleteSelect({
         <input
           id={id}
           type="text"
-          value={query}
+          value={inputValue}
           onChange={handleInputChange}
           onFocus={() => {
             setOpen(true)
@@ -798,9 +814,9 @@ function AsyncAutocompleteSelect({
             className="machine-autocomplete-clear"
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => {
-              typingRef.current = false
               setSelectedOption(null)
-              setQuery("")
+              setIsEditing(true)
+              setDraftQuery("")
               setHighlightedIndex(0)
               setOpen(true)
               onChange("", null)
@@ -911,9 +927,10 @@ function AsyncAutocompleteSelect({
 
 export default function MasterMesinPage() {
   const router = useRouter()
+  const { user: currentUser } = useAppBootstrap()
   const toastTimerRef = useRef(null)
+  const importFileInputRef = useRef(null)
 
-  const [currentUser, setCurrentUser] = useState(null)
   const [constantOptions, setConstantOptions] = useState({
     machine_categories: [],
     categories: FALLBACK_CATEGORIES,
@@ -933,10 +950,9 @@ export default function MasterMesinPage() {
     in_warranty: 0,
   })
   const [pagination, setPagination] = useState({
-    page: 1,
     page_size: 10,
-    total: 0,
-    total_pages: 1,
+    has_more: false,
+    next_cursor: null,
   })
 
   const [searchText, setSearchText] = useState("")
@@ -949,6 +965,8 @@ export default function MasterMesinPage() {
   const [activeFilter, setActiveFilter] = useState("")
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
+  const [afterId, setAfterId] = useState("")
+  const [cursorHistory, setCursorHistory] = useState([])
   const [refreshKey, setRefreshKey] = useState(0)
 
   const [loading, setLoading] = useState(true)
@@ -958,6 +976,12 @@ export default function MasterMesinPage() {
   const [optionsLoading, setOptionsLoading] = useState(true)
   const [dataNotice, setDataNotice] = useState("")
   const [schemaInfo, setSchemaInfo] = useState({ tid_enabled: true })
+  const [permissionInfo, setPermissionInfo] = useState({
+    can_view: true,
+    can_create: false,
+    can_update: false,
+    can_delete: false,
+  })
 
   const [modalOpen, setModalOpen] = useState(false)
   const [editingId, setEditingId] = useState(null)
@@ -970,6 +994,15 @@ export default function MasterMesinPage() {
   const [saving, setSaving] = useState(false)
   const [modalError, setModalError] = useState("")
 
+  const [importModalOpen, setImportModalOpen] = useState(false)
+  const [importFile, setImportFile] = useState(null)
+  const [importRows, setImportRows] = useState([])
+  const [importErrors, setImportErrors] = useState([])
+  const [importError, setImportError] = useState("")
+  const [importParsing, setImportParsing] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [importDragActive, setImportDragActive] = useState(false)
+
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState("")
@@ -981,11 +1014,10 @@ export default function MasterMesinPage() {
   })
 
   const isSuperAdmin = currentUser?.roleCode === "SUPER_ADMIN"
-  const canManage = isSuperAdmin || Boolean(currentUser?.codeUker)
-  const pageNumbers = useMemo(
-    () => getPageNumbers(pagination.page, pagination.total_pages),
-    [pagination.page, pagination.total_pages]
-  )
+  const canCreate = isSuperAdmin || Boolean(permissionInfo.can_create)
+  const canUpdate = isSuperAdmin || Boolean(permissionInfo.can_update)
+  const canDelete = isSuperAdmin || Boolean(permissionInfo.can_delete)
+  const canManage = canUpdate || canDelete
   const kategoriMesinOptions = useMemo(
     () =>
       Array.from(
@@ -999,7 +1031,36 @@ export default function MasterMesinPage() {
   )
   const formOptionsReady =
     schemaInfo.tid_enabled && !optionsLoading && !optionsError
+  const importErrorRows = new Set(
+    importErrors
+      .map((error) => Number(error.row))
+      .filter((row) => Number.isSafeInteger(row) && row > 0)
+  )
+  const importInvalidCount = importErrorRows.size
+  const importValidCount = Math.max(0, importRows.length - importInvalidCount)
+  const importErrorsByRow = new Map()
 
+  importErrors.forEach((error) => {
+    const rowNumber = Number(error.row)
+    if (!Number.isSafeInteger(rowNumber) || rowNumber <= 0) return
+
+    const rowErrors = importErrorsByRow.get(rowNumber) || []
+    rowErrors.push(error.message)
+    importErrorsByRow.set(rowNumber, rowErrors)
+  })
+
+  const importPreviewRows =
+    importErrors.length > 0
+      ? importRows
+          .filter((row) => importErrorRows.has(Number(row._row_number)))
+          .slice(0, 10)
+      : importRows.slice(0, 10)
+
+  function resetListCursor() {
+    setPage(1)
+    setAfterId("")
+    setCursorHistory([])
+  }
 
   useEffect(() => {
     const controller = new AbortController()
@@ -1007,30 +1068,6 @@ export default function MasterMesinPage() {
     async function loadIdentityAndOptions() {
       setOptionsLoading(true)
       setOptionsError("")
-
-      try {
-        const userResult = await requestJson("/api/auth/me", {
-          method: "GET",
-          signal: controller.signal,
-        })
-
-        if (!controller.signal.aborted) {
-          setCurrentUser(userResult.data)
-        }
-      } catch (error) {
-        if (error?.name === "AbortError") {
-          return
-        }
-
-        if (error?.status === 401) {
-          router.replace(`/login?next=${encodeURIComponent("/masters/mesin")}`)
-          return
-        }
-
-        setOptionsError(
-          getErrorMessage(error, "Gagal membaca pengguna aktif.")
-        )
-      }
 
       try {
         const optionsResult = await requestJson(
@@ -1044,6 +1081,14 @@ export default function MasterMesinPage() {
         if (!controller.signal.aborted) {
           setSchemaInfo(
             optionsResult.data?.schema || { tid_enabled: true }
+          )
+          setPermissionInfo(
+            optionsResult.data?.scope || {
+              can_view: true,
+              can_create: false,
+              can_update: false,
+              can_delete: false,
+            }
           )
           setConstantOptions((current) => {
             const constants = optionsResult.data?.constants || {}
@@ -1092,6 +1137,38 @@ export default function MasterMesinPage() {
 
   useEffect(() => {
     const controller = new AbortController()
+
+    async function loadSummary() {
+      try {
+        const result = await requestJson("/api/masters/mesin?mode=summary", {
+          method: "GET",
+          signal: controller.signal,
+        })
+
+        if (!controller.signal.aborted) {
+          setSummary(
+            result.data?.summary || {
+              total: 0,
+              active: 0,
+              onsite: 0,
+              offsite: 0,
+              in_warranty: 0,
+            }
+          )
+        }
+      } catch (error) {
+        if (error?.name !== "AbortError") {
+          console.error("Gagal memuat summary Mesin:", error)
+        }
+      }
+    }
+
+    void loadSummary()
+    return () => controller.abort()
+  }, [refreshKey])
+
+  useEffect(() => {
+    const controller = new AbortController()
     const timer = window.setTimeout(async () => {
       try {
         setLoadError("")
@@ -1103,9 +1180,12 @@ export default function MasterMesinPage() {
         }
 
         const params = new URLSearchParams({
-          page: String(page),
           page_size: String(pageSize),
         })
+
+        if (afterId) {
+          params.set("after_id", afterId)
+        }
 
         if (searchText.trim()) {
           params.set("search", searchText.trim())
@@ -1151,21 +1231,11 @@ export default function MasterMesinPage() {
           setMesins(
             Array.isArray(result.data?.mesins) ? result.data.mesins : []
           )
-          setSummary(
-            result.data?.summary || {
-              total: 0,
-              active: 0,
-              onsite: 0,
-              offsite: 0,
-              in_warranty: 0,
-            }
-          )
           setPagination(
             result.data?.pagination || {
-              page: 1,
               page_size: pageSize,
-              total: 0,
-              total_pages: 1,
+              has_more: false,
+              next_cursor: null,
             }
           )
           setSchemaInfo(result.data?.schema || { tid_enabled: true })
@@ -1204,7 +1274,7 @@ export default function MasterMesinPage() {
     cabangFilter,
     kategoriLokasiFilter,
     kategoriMesinFilter,
-    page,
+    afterId,
     pageSize,
     projectFilter,
     refreshKey,
@@ -1223,7 +1293,7 @@ export default function MasterMesinPage() {
   }, [])
 
   useEffect(() => {
-    if (!modalOpen && !deleteTarget) {
+    if (!modalOpen && !importModalOpen && !deleteTarget) {
       return undefined
     }
 
@@ -1231,13 +1301,22 @@ export default function MasterMesinPage() {
     document.body.style.overflow = "hidden"
 
     function handleEscape(event) {
-      if (event.key !== "Escape" || saving || deleting) {
+      if (
+        event.key !== "Escape" ||
+        saving ||
+        deleting ||
+        importing ||
+        importParsing
+      ) {
         return
       }
 
       if (deleteTarget) {
         setDeleteTarget(null)
         setDeleteError("")
+      } else if (importModalOpen) {
+        setImportModalOpen(false)
+        resetImportState()
       } else {
         setModalOpen(false)
         setModalError("")
@@ -1250,7 +1329,15 @@ export default function MasterMesinPage() {
       window.removeEventListener("keydown", handleEscape)
       document.body.style.overflow = previousOverflow
     }
-  }, [deleteTarget, deleting, modalOpen, saving])
+  }, [
+    deleteTarget,
+    deleting,
+    importModalOpen,
+    importing,
+    importParsing,
+    modalOpen,
+    saving,
+  ])
 
   function showToast(message, type = "success") {
     if (toastTimerRef.current) {
@@ -1279,7 +1366,7 @@ export default function MasterMesinPage() {
     setModalOpen(true)
   }
 
-  function openEditModal(item) {
+  function setEditFormData(item) {
     setEditingId(item.id)
     setForm(mapToForm(item))
     setFormInitialOptions({
@@ -1305,8 +1392,51 @@ export default function MasterMesinPage() {
           }
         : null,
     })
-    setModalError("")
-    setModalOpen(true)
+  }
+
+  async function openEditModal(item) {
+    try {
+      setModalError("")
+      const result = await requestJson(
+        `/api/masters/mesin?mode=detail&id=${encodeURIComponent(item.id)}`,
+        { method: "GET" }
+      )
+      const detailItem = result.data?.mesin
+      const currentItem = detailItem
+        ? { ...item, ...detailItem }
+        : item
+      const rowVersion =
+        getRowVersionToken(currentItem) ||
+        normalizeRowVersionToken(result.data?.version?.row_version) ||
+        getRowVersionToken(item)
+
+      if (!currentItem?.id) {
+        throw new Error("Data Mesin tidak ditemukan.")
+      }
+
+      setEditFormData({
+        ...currentItem,
+        row_version: rowVersion,
+        updated_at: currentItem.updated_at || item.updated_at || "",
+      })
+      setModalOpen(true)
+    } catch (error) {
+      const fallbackRowVersion = getRowVersionToken(item)
+
+      if (item?.id && (fallbackRowVersion || item?.updated_at)) {
+        setEditFormData({
+          ...item,
+          row_version: fallbackRowVersion,
+        })
+        setModalOpen(true)
+        return
+      }
+
+      showToast(
+        getErrorMessage(error, "Gagal mengambil data Mesin terbaru."),
+        "error"
+      )
+    }
   }
 
   function closeModal() {
@@ -1316,6 +1446,105 @@ export default function MasterMesinPage() {
 
     setModalOpen(false)
     setModalError("")
+  }
+
+  function resetImportState() {
+    setImportFile(null)
+    setImportRows([])
+    setImportErrors([])
+    setImportError("")
+    setImportParsing(false)
+    setImportDragActive(false)
+
+    if (importFileInputRef.current) {
+      importFileInputRef.current.value = ""
+    }
+  }
+
+  function openImportModal() {
+    resetImportState()
+    setImportModalOpen(true)
+  }
+
+  function closeImportModal() {
+    if (importing || importParsing) return
+
+    setImportModalOpen(false)
+    resetImportState()
+  }
+
+  async function processImportFile(file) {
+    if (!file) return
+
+    setImportFile(file)
+    setImportRows([])
+    setImportErrors([])
+    setImportError("")
+    setImportParsing(true)
+
+    try {
+      const parsedRows = await parseMachineSpreadsheet(file)
+      const validation = validateMachineImportRows(parsedRows)
+      setImportRows(validation.rows)
+      setImportErrors(validation.errors)
+    } catch (error) {
+      setImportError(getErrorMessage(error, "File mesin gagal dibaca."))
+    } finally {
+      setImportParsing(false)
+    }
+  }
+
+  function handleImportFileChange(event) {
+    const file = event.target.files?.[0] || null
+    void processImportFile(file)
+  }
+
+  function handleImportDrop(event) {
+    event.preventDefault()
+    setImportDragActive(false)
+
+    const file = event.dataTransfer.files?.[0] || null
+    void processImportFile(file)
+  }
+
+  async function handleImportSubmit() {
+    if (importRows.length === 0 || importErrors.length > 0) return
+
+    setImporting(true)
+    setImportError("")
+
+    try {
+      const result = await requestJson("/api/masters/mesin/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows: importRows }),
+      })
+
+      setImportModalOpen(false)
+      resetImportState()
+      resetListCursor()
+      setRefreshKey((current) => current + 1)
+      showToast(result.message || "Data mesin berhasil diupload.")
+    } catch (error) {
+      if (error?.status === 401) {
+        router.replace(`/login?next=${encodeURIComponent("/masters/mesin")}`)
+        return
+      }
+
+      if (error?.status === 403) {
+        router.replace("/forbidden")
+        return
+      }
+
+      const serverErrors = error?.payload?.data?.errors
+      if (Array.isArray(serverErrors)) {
+        setImportErrors(serverErrors)
+      }
+
+      setImportError(getErrorMessage(error, "Data mesin gagal diupload."))
+    } finally {
+      setImporting(false)
+    }
   }
 
   function handleJamOpsChange(value) {
@@ -1350,6 +1579,10 @@ export default function MasterMesinPage() {
 
     if (!form.sn.trim()) {
       return "SN wajib diisi."
+    }
+
+    if (form.tid.trim().toUpperCase() === form.sn.trim().toUpperCase()) {
+      return "TID dan SN tidak boleh memiliki nilai yang sama."
     }
 
     if (!form.cabang_id) {
@@ -1418,7 +1651,13 @@ export default function MasterMesinPage() {
       setModalError("")
 
       const payload = {
-        ...(editingId ? { id: editingId } : {}),
+        ...(editingId
+          ? {
+              id: editingId,
+              row_version: normalizeRowVersionToken(form.row_version),
+              updated_at: form.updated_at,
+            }
+          : {}),
         tid: form.tid.trim().toUpperCase(),
         sn: form.sn.trim().toUpperCase(),
         db: form.db.trim(),
@@ -1447,7 +1686,7 @@ export default function MasterMesinPage() {
       setModalOpen(false)
       setEditingId(null)
       setForm(EMPTY_FORM)
-      setPage(1)
+      resetListCursor()
       setRefreshKey((current) => current + 1)
       showToast(result.message || "Data Mesin berhasil disimpan.")
     } catch (error) {
@@ -1483,7 +1722,7 @@ export default function MasterMesinPage() {
       })
 
       setDeleteTarget(null)
-      setPage(1)
+      resetListCursor()
       setRefreshKey((current) => current + 1)
       showToast(result.message || "Data Mesin berhasil dihapus.")
     } catch (error) {
@@ -1512,7 +1751,7 @@ export default function MasterMesinPage() {
     setKategoriLokasiFilter("")
     setSiteFilter("")
     setActiveFilter("")
-    setPage(1)
+    resetListCursor()
   }
 
   return (
@@ -1534,24 +1773,43 @@ export default function MasterMesinPage() {
           <Link href="/masters" className="user-role-button secondary">
             Kembali
           </Link>
-          {canManage ? (
-            <button
-              type="button"
-              className="user-role-button primary"
-              onClick={openCreateModal}
-              disabled={!formOptionsReady}
-              title={
-                !schemaInfo.tid_enabled
-                  ? "Jalankan migration 011 terlebih dahulu"
-                  : optionsLoading
-                    ? "Konfigurasi form sedang dimuat"
-                    : optionsError
-                      ? "Konfigurasi form gagal dimuat"
-                      : "Tambah data Mesin"
-              }
-            >
-              Tambah Mesin
-            </button>
+          {canCreate ? (
+            <>
+              <button
+                type="button"
+                className="user-role-button secondary"
+                onClick={openImportModal}
+                disabled={!formOptionsReady}
+                title={
+                  !schemaInfo.tid_enabled
+                    ? "Jalankan migration 011 terlebih dahulu"
+                    : optionsLoading
+                      ? "Konfigurasi upload sedang dimuat"
+                      : optionsError
+                        ? "Konfigurasi upload gagal dimuat"
+                        : "Upload data Mesin dari XLSX atau CSV"
+                }
+              >
+                Upload Mesin
+              </button>
+              <button
+                type="button"
+                className="user-role-button primary"
+                onClick={openCreateModal}
+                disabled={!formOptionsReady}
+                title={
+                  !schemaInfo.tid_enabled
+                    ? "Jalankan migration 011 terlebih dahulu"
+                    : optionsLoading
+                      ? "Konfigurasi form sedang dimuat"
+                      : optionsError
+                        ? "Konfigurasi form gagal dimuat"
+                        : "Tambah data Mesin"
+                }
+              >
+                Tambah Mesin
+              </button>
+            </>
           ) : null}
         </div>
       </section>
@@ -1587,7 +1845,7 @@ export default function MasterMesinPage() {
               value={searchText}
               onChange={(event) => {
                 setSearchText(event.target.value)
-                setPage(1)
+                resetListCursor()
               }}
               placeholder="Cari TID, SN, DB, lokasi, Cabang, Project, Merk, atau model..."
               aria-label="Cari data Mesin"
@@ -1600,7 +1858,7 @@ export default function MasterMesinPage() {
               value={cabangFilter}
               onChange={(value) => {
                 setCabangFilter(value)
-                setPage(1)
+                resetListCursor()
               }}
               placeholder="Cari Cabang"
               emptyOptionLabel="Semua Cabang"
@@ -1614,7 +1872,7 @@ export default function MasterMesinPage() {
               value={projectFilter}
               onChange={(value) => {
                 setProjectFilter(value)
-                setPage(1)
+                resetListCursor()
               }}
               placeholder="Cari Project"
               emptyOptionLabel="Semua Project"
@@ -1628,7 +1886,7 @@ export default function MasterMesinPage() {
               value={tipeMesinFilter}
               onChange={(value) => {
                 setTipeMesinFilter(value)
-                setPage(1)
+                resetListCursor()
               }}
               placeholder="Cari Tipe Mesin"
               emptyOptionLabel="Semua Tipe Mesin"
@@ -1641,7 +1899,7 @@ export default function MasterMesinPage() {
               value={kategoriMesinFilter}
               onChange={(value) => {
                 setKategoriMesinFilter(value)
-                setPage(1)
+                resetListCursor()
               }}
               placeholder="Cari Kategori Mesin"
               className="machine-filter-autocomplete"
@@ -1660,7 +1918,7 @@ export default function MasterMesinPage() {
               value={kategoriLokasiFilter}
               onChange={(value) => {
                 setKategoriLokasiFilter(value)
-                setPage(1)
+                resetListCursor()
               }}
               placeholder="Cari Kategori Lokasi"
               className="machine-filter-autocomplete"
@@ -1679,7 +1937,7 @@ export default function MasterMesinPage() {
               value={siteFilter}
               onChange={(value) => {
                 setSiteFilter(value)
-                setPage(1)
+                resetListCursor()
               }}
               placeholder="Cari Site"
               className="machine-filter-autocomplete"
@@ -1698,7 +1956,7 @@ export default function MasterMesinPage() {
               value={activeFilter}
               onChange={(value) => {
                 setActiveFilter(value)
-                setPage(1)
+                resetListCursor()
               }}
               placeholder="Cari Status"
               className="machine-filter-autocomplete"
@@ -1884,7 +2142,8 @@ export default function MasterMesinPage() {
                     {canManage ? (
                       <td>
                         <div className="user-role-actions project-actions">
-                          <button
+                          {canUpdate ? (
+                            <button
                             type="button"
                             className="edit"
                             onClick={() => openEditModal(item)}
@@ -1897,7 +2156,9 @@ export default function MasterMesinPage() {
                           >
                             Edit
                           </button>
-                          <button
+                          ) : null}
+                          {canDelete ? (
+                            <button
                             type="button"
                             className="delete"
                             onClick={() => {
@@ -1907,6 +2168,7 @@ export default function MasterMesinPage() {
                           >
                             Hapus
                           </button>
+                          ) : null}
                         </div>
                       </td>
                     ) : null}
@@ -1919,7 +2181,7 @@ export default function MasterMesinPage() {
 
         <div className="project-pagination">
           <p>
-            Menampilkan {mesins.length} dari {pagination.total} data Mesin.
+            Menampilkan {mesins.length} data pada halaman {page}. Total dalam scope: {summary.total}.
           </p>
 
           <div className="project-pagination-controls">
@@ -1929,7 +2191,7 @@ export default function MasterMesinPage() {
                 value={pageSize}
                 onChange={(event) => {
                   setPageSize(Number(event.target.value))
-                  setPage(1)
+                  resetListCursor()
                 }}
               >
                 <option value={10}>10</option>
@@ -1942,40 +2204,338 @@ export default function MasterMesinPage() {
             <nav aria-label="Pagination Master Mesin">
               <button
                 type="button"
-                onClick={() => setPage((current) => Math.max(1, current - 1))}
-                disabled={pagination.page <= 1}
+                onClick={() => {
+                  const previousCursors = [...cursorHistory]
+                  const previousCursor = previousCursors.pop() || ""
+                  setCursorHistory(previousCursors)
+                  setAfterId(previousCursor)
+                  setPage((current) => Math.max(1, current - 1))
+                }}
+                disabled={cursorHistory.length === 0}
                 aria-label="Halaman sebelumnya"
               >
-                ‹
+                ‹ Sebelumnya
               </button>
 
-              {pageNumbers.map((pageNumber) => (
-                <button
-                  type="button"
-                  key={pageNumber}
-                  className={pageNumber === pagination.page ? "active" : ""}
-                  onClick={() => setPage(pageNumber)}
-                >
-                  {pageNumber}
-                </button>
-              ))}
+              <span className="project-pagination-current">Halaman {page}</span>
 
               <button
                 type="button"
-                onClick={() =>
-                  setPage((current) =>
-                    Math.min(pagination.total_pages, current + 1)
-                  )
-                }
-                disabled={pagination.page >= pagination.total_pages}
+                onClick={() => {
+                  if (!pagination.next_cursor) return
+                  setCursorHistory((current) => [...current, afterId])
+                  setAfterId(pagination.next_cursor)
+                  setPage((current) => current + 1)
+                }}
+                disabled={!pagination.has_more || !pagination.next_cursor}
                 aria-label="Halaman berikutnya"
               >
-                ›
+                Berikutnya ›
               </button>
             </nav>
           </div>
         </div>
       </section>
+
+      {importModalOpen ? (
+        <div
+          className="user-role-modal-backdrop"
+          onMouseDown={(event) => {
+            if (
+              event.target === event.currentTarget &&
+              !importing &&
+              !importParsing
+            ) {
+              closeImportModal()
+            }
+          }}
+        >
+          <section
+            className="user-role-modal machine-import-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="machine-import-title"
+          >
+            <header className="user-role-modal-header">
+              <div>
+                <p className="eyebrow">Master Mesin</p>
+                <h3 id="machine-import-title">Upload Data Mesin</h3>
+                <p>
+                  Import maksimal 500 mesin. TID dan SN divalidasi unik terhadap
+                  file dan database sebelum data disimpan.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={closeImportModal}
+                disabled={importing || importParsing}
+                aria-label="Tutup formulir upload"
+              >
+                ×
+              </button>
+            </header>
+
+            <form
+              className="machine-import-form"
+              onSubmit={(event) => {
+                event.preventDefault()
+                void handleImportSubmit()
+              }}
+            >
+              <div className="user-role-form-grid single machine-import-form-grid">
+                <div className="user-role-form-field full">
+                  <label>Template Data Mesin</label>
+                  <div className="machine-import-template-field">
+                    <div>
+                      <strong>Gunakan template resmi</strong>
+                      <small>
+                        Isi kode Cabang, Project, Merk, Jenis Mesin, dan Model
+                        sesuai data master. Jangan mengubah nama kolom.
+                      </small>
+                    </div>
+                    <a
+                      href="/templates/template-upload-mesin.xlsx"
+                      download
+                      className="user-role-button secondary machine-import-download"
+                    >
+                      Unduh Template XLSX
+                    </a>
+                  </div>
+                </div>
+
+                <div className="user-role-form-field full">
+                  <label htmlFor="machine-import-file">File Mesin *</label>
+                  <div
+                    className={`machine-import-dropzone ${
+                      importDragActive ? "active" : ""
+                    }`}
+                    onDragEnter={(event) => {
+                      event.preventDefault()
+                      setImportDragActive(true)
+                    }}
+                    onDragOver={(event) => event.preventDefault()}
+                    onDragLeave={(event) => {
+                      event.preventDefault()
+                      if (!event.currentTarget.contains(event.relatedTarget)) {
+                        setImportDragActive(false)
+                      }
+                    }}
+                    onDrop={handleImportDrop}
+                  >
+                    <input
+                      id="machine-import-file"
+                      ref={importFileInputRef}
+                      type="file"
+                      accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
+                      onChange={handleImportFileChange}
+                      hidden
+                    />
+                    <span className="machine-import-file-icon">XLSX</span>
+                    <div className="machine-import-file-copy">
+                      <strong>
+                        {importFile
+                          ? importFile.name
+                          : "Pilih atau tarik file mesin ke area ini"}
+                      </strong>
+                      <small>
+                        {importFile
+                          ? `${formatFileSize(importFile.size)} • File sudah dibaca`
+                          : "Format XLSX/CSV, maksimal 5 MB dan 500 baris."}
+                      </small>
+                    </div>
+                    <button
+                      type="button"
+                      className="user-role-button secondary machine-import-file-button"
+                      onClick={() => importFileInputRef.current?.click()}
+                      disabled={importParsing || importing}
+                    >
+                      {importFile ? "Ganti File" : "Pilih File"}
+                    </button>
+                  </div>
+                </div>
+
+                <details className="machine-import-format-details">
+                  <summary>Lihat ketentuan data upload</summary>
+                  <div className="machine-import-rules">
+                    <p>
+                      <strong>TID dan SN:</strong> wajib, tidak boleh sama dalam
+                      satu mesin, tidak boleh duplikat di file, dan tidak boleh
+                      sudah terdaftar di database.
+                    </p>
+                    <p>
+                      <strong>Referensi:</strong> kode_cabang, kode_project,
+                      kode_merk, jenis_mesin, dan nama_model harus sama dengan
+                      data pada menu master terkait.
+                    </p>
+                    <p>
+                      <strong>Nilai baku:</strong> site ONSITE/OFFSITE; status
+                      AKTIF/NONAKTIF; garansi IN WARRANTY/OUT WARRANTY.
+                    </p>
+                    <p>
+                      <strong>Kategori Lokasi:</strong>{" "}
+                      {(constantOptions.categories || FALLBACK_CATEGORIES).join(", ")}.
+                      Spasi tersembunyi dan variasi penulisan umum akan
+                      dinormalisasi otomatis.
+                    </p>
+                    <p>
+                      Kolom DB, longitude, dan latitude dapat dikosongkan.
+                      Kolom operasional yang kosong akan memakai nilai bawaan
+                      pada template.
+                    </p>
+                  </div>
+                </details>
+
+                {importParsing ? (
+                  <div className="machine-import-processing">
+                    Membaca dan memvalidasi file...
+                  </div>
+                ) : null}
+
+                {importFile && !importParsing ? (
+                  <div className="machine-import-summary">
+                    <article>
+                      <span>Total Baris</span>
+                      <strong>{importRows.length}</strong>
+                    </article>
+                    <article className="valid">
+                      <span>Valid Lokal</span>
+                      <strong>{importValidCount}</strong>
+                    </article>
+                    <article className={importInvalidCount > 0 ? "invalid" : ""}>
+                      <span>Perlu Diperbaiki</span>
+                      <strong>{importInvalidCount}</strong>
+                    </article>
+                  </div>
+                ) : null}
+
+                {importError ? (
+                  <div className="user-role-alert error machine-import-alert">
+                    <strong>Upload belum dapat diproses</strong>
+                    <span>{importError}</span>
+                  </div>
+                ) : null}
+
+                {importErrors.length > 0 ? (
+                  <div className="machine-import-error-list">
+                    <strong>Kesalahan data ({importErrors.length})</strong>
+                    <ul>
+                      {importErrors.slice(0, 15).map((error, index) => (
+                        <li
+                          key={`${error.row || "general"}-${
+                            error.field || "field"
+                          }-${index}`}
+                        >
+                          {error.row ? `Baris ${error.row}: ` : ""}
+                          {error.message}
+                        </li>
+                      ))}
+                    </ul>
+                    {importErrors.length > 15 ? (
+                      <small>
+                        Masih ada {importErrors.length - 15} kesalahan lain.
+                      </small>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {importRows.length > 0 ? (
+                  <div className="machine-import-preview">
+                    <div className="machine-import-preview-heading">
+                      <strong>Pratinjau data</strong>
+                      <span>
+                        {importErrors.length > 0
+                          ? "Menampilkan baris yang perlu diperbaiki"
+                          : "Menampilkan maksimal 10 baris pertama"}
+                      </span>
+                    </div>
+                    <div className="machine-import-preview-table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Baris</th>
+                            <th>TID</th>
+                            <th>SN</th>
+                            <th>Cabang</th>
+                            <th>Project</th>
+                            <th>Tipe Mesin</th>
+                            <th>Site</th>
+                            <th>Kategori Lokasi</th>
+                            <th>Status</th>
+                            <th>Validasi</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {importPreviewRows.map((row) => {
+                            const rowErrors =
+                              importErrorsByRow.get(row._row_number) || []
+
+                            return (
+                              <tr
+                                key={row._row_number}
+                                className={rowErrors.length > 0 ? "invalid" : ""}
+                              >
+                                <td>{row._row_number}</td>
+                                <td>{row.tid || "-"}</td>
+                                <td>{row.sn || "-"}</td>
+                                <td>{row.kode_cabang || "-"}</td>
+                                <td>{row.kode_project || "-"}</td>
+                                <td>
+                                  {[row.kode_merk, row.jenis_mesin, row.nama_model]
+                                    .filter(Boolean)
+                                    .join(" · ") || "-"}
+                                </td>
+                                <td>{row.site || "-"}</td>
+                                <td>{row.kategori_lokasi || "-"}</td>
+                                <td>{row.status || "-"}</td>
+                                <td>
+                                  <span
+                                    className={`machine-import-row-status ${
+                                      rowErrors.length > 0 ? "invalid" : "valid"
+                                    }`}
+                                    title={rowErrors.join(" ")}
+                                  >
+                                    {rowErrors.length > 0 ? "Periksa" : "Valid"}
+                                  </span>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
+              <footer className="user-role-modal-footer">
+                <button
+                  type="button"
+                  className="user-role-button secondary"
+                  onClick={closeImportModal}
+                  disabled={importing || importParsing}
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="user-role-button primary"
+                  disabled={
+                    importing ||
+                    importParsing ||
+                    importRows.length === 0 ||
+                    importErrors.length > 0
+                  }
+                >
+                  {importing
+                    ? "Mengupload..."
+                    : `Upload ${importRows.length || ""} Mesin`.trim()}
+                </button>
+              </footer>
+            </form>
+          </section>
+        </div>
+      ) : null}
 
       {modalOpen ? (
         <div className="user-role-modal-backdrop" role="presentation">

@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server"
+import { authorizeApiRequest } from "@/lib/access-control"
 import { connectDB, sql } from "@/lib/mssql"
+import { writeAuditLog } from "@/lib/security/audit-log"
+import { normalizeRowVersionToken } from "@/modules/master-mesin/row-version"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -14,6 +17,27 @@ function createErrorResponse(message, status = 400) {
       status
     }
   )
+}
+
+
+async function authorizeSettings(request, action = "view") {
+  const authorization = await authorizeApiRequest(request, "/settings", action)
+
+  if (!authorization.authorized) {
+    return authorization
+  }
+
+  if (authorization.user.role_code !== "SUPER_ADMIN") {
+    return {
+      authorized: false,
+      response: createErrorResponse(
+        "Hanya Super Admin yang dapat mengelola side menu.",
+        403
+      ),
+    }
+  }
+
+  return authorization
 }
 
 function normalizeText(value) {
@@ -115,7 +139,12 @@ function validateMenuPayload(body, requireId = false) {
   }
 }
 
-export async function GET() {
+export async function GET(request) {
+  const authorization = await authorizeSettings(request, "view")
+
+  if (!authorization.authorized) {
+    return authorization.response
+  }
   try {
     const db = await connectDB()
 
@@ -128,6 +157,7 @@ export async function GET() {
         badge,
         sort_order,
         is_active,
+        row_version,
         created_at
       FROM dbo.sidebar_routes
       ORDER BY sort_order ASC, id ASC
@@ -135,7 +165,10 @@ export async function GET() {
 
     return NextResponse.json({
       success: true,
-      data: result.recordset
+      data: result.recordset.map((item) => ({
+        ...item,
+        row_version: normalizeRowVersionToken(item.row_version),
+      }))
     })
   } catch (error) {
     console.error("GET side menu error:", error)
@@ -148,6 +181,11 @@ export async function GET() {
 }
 
 export async function POST(request) {
+  const authorization = await authorizeSettings(request, "create")
+
+  if (!authorization.authorized) {
+    return authorization.response
+  }
   try {
     const body = await request.json()
     const validation = validateMenuPayload(body)
@@ -202,6 +240,7 @@ export async function POST(request) {
           inserted.badge,
           inserted.sort_order,
           inserted.is_active,
+          inserted.row_version,
           inserted.created_at
         VALUES
         (
@@ -215,11 +254,27 @@ export async function POST(request) {
         )
       `)
 
+    const createdRecord = result.recordset[0]
+    const createdMenu = {
+      ...createdRecord,
+      row_version: normalizeRowVersionToken(createdRecord?.row_version),
+    }
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "CREATE",
+      module: "settings.side_menu",
+      entityType: "sidebar_route",
+      entityId: createdMenu.id,
+      metadata: { after: createdMenu },
+    })
+
     return NextResponse.json(
       {
         success: true,
         message: "Menu berhasil ditambahkan.",
-        data: result.recordset[0]
+        data: createdMenu
       },
       {
         status: 201
@@ -242,6 +297,11 @@ export async function POST(request) {
 }
 
 export async function PUT(request) {
+  const authorization = await authorizeSettings(request, "update")
+
+  if (!authorization.authorized) {
+    return authorization.response
+  }
   try {
     const body = await request.json()
     const validation = validateMenuPayload(body, true)
@@ -251,13 +311,31 @@ export async function PUT(request) {
     }
 
     const menu = validation.data
+    const requestedRowVersion = normalizeRowVersionToken(body.row_version)
+
+    if (!requestedRowVersion) {
+      return createErrorResponse(
+        "Versi data menu tidak tersedia. Muat ulang sebelum menyimpan.",
+        409
+      )
+    }
+
     const db = await connectDB()
 
     const existingResult = await db
       .request()
       .input("id", sql.Int, menu.id)
       .query(`
-        SELECT TOP 1 id
+        SELECT TOP 1
+          id,
+          label,
+          href,
+          icon,
+          badge,
+          sort_order,
+          is_active,
+          row_version,
+          created_at
         FROM dbo.sidebar_routes
         WHERE id = @id
       `)
@@ -266,6 +344,18 @@ export async function PUT(request) {
       return createErrorResponse(
         "Menu tidak ditemukan.",
         404
+      )
+    }
+
+    const existingMenu = {
+      ...existingResult.recordset[0],
+      row_version: normalizeRowVersionToken(existingResult.recordset[0].row_version),
+    }
+
+    if (requestedRowVersion !== existingMenu.row_version) {
+      return createErrorResponse(
+        "Data menu telah berubah oleh pengguna lain. Muat ulang sebelum menyimpan.",
+        409
       )
     }
 
@@ -290,6 +380,11 @@ export async function PUT(request) {
     const result = await db
       .request()
       .input("id", sql.Int, menu.id)
+      .input(
+        "rowVersion",
+        sql.VarBinary(8),
+        Buffer.from(requestedRowVersion.slice(2), "hex")
+      )
       .input("label", sql.VarChar(100), menu.label)
       .input("href", sql.VarChar(200), menu.href)
       .input("icon", sql.VarChar(100), menu.icon)
@@ -313,14 +408,42 @@ export async function PUT(request) {
           inserted.badge,
           inserted.sort_order,
           inserted.is_active,
+          inserted.row_version,
           inserted.created_at
         WHERE id = @id
+          AND row_version = @rowVersion
       `)
+
+    if (result.recordset.length === 0) {
+      return createErrorResponse(
+        "Data menu telah berubah oleh pengguna lain. Muat ulang sebelum menyimpan.",
+        409
+      )
+    }
+
+    const updatedRecord = result.recordset[0]
+    const updatedMenu = {
+      ...updatedRecord,
+      row_version: normalizeRowVersionToken(updatedRecord.row_version),
+    }
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "UPDATE",
+      module: "settings.side_menu",
+      entityType: "sidebar_route",
+      entityId: menu.id,
+      metadata: {
+        before: existingMenu,
+        after: updatedMenu,
+      },
+    })
 
     return NextResponse.json({
       success: true,
       message: "Menu berhasil diperbarui.",
-      data: result.recordset[0]
+      data: updatedMenu
     })
   } catch (error) {
     console.error("PUT side menu error:", error)
@@ -339,6 +462,11 @@ export async function PUT(request) {
 }
 
 export async function DELETE(request) {
+  const authorization = await authorizeSettings(request, "delete")
+
+  if (!authorization.authorized) {
+    return authorization.response
+  }
   try {
     const requestUrl = new URL(request.url)
     const id = Number(requestUrl.searchParams.get("id"))
@@ -370,10 +498,22 @@ export async function DELETE(request) {
       )
     }
 
+    const deletedMenu = result.recordset[0]
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "DELETE",
+      module: "settings.side_menu",
+      entityType: "sidebar_route",
+      entityId: id,
+      metadata: { before: deletedMenu },
+    })
+
     return NextResponse.json({
       success: true,
       message: "Menu berhasil dihapus.",
-      data: result.recordset[0]
+      data: deletedMenu
     })
   } catch (error) {
     console.error("DELETE side menu error:", error)

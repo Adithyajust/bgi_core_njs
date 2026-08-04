@@ -5,6 +5,8 @@ import {
   getUserDataScope,
 } from "@/lib/access-control"
 import { connectDB, sql } from "@/lib/mssql"
+import { writeAuditLog } from "@/lib/security/audit-log"
+import { normalizeRowVersionToken } from "@/modules/master-mesin/row-version"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -309,8 +311,8 @@ function validateProjectPayload(body) {
   }
 }
 
-async function authorizeMaster(request) {
-  return authorizeApiRequest(request, "/masters")
+async function authorizeMaster(request, action = "view") {
+  return authorizeApiRequest(request, "/masters", action)
 }
 
 function requireSuperAdmin(authorization) {
@@ -389,6 +391,7 @@ async function getProjectById(db, id, scopeCodeUker = null) {
         p.progress,
         p.keterangan,
         p.is_active,
+        p.row_version,
         p.created_at,
         p.updated_at
       FROM dbo.master_project p
@@ -398,7 +401,10 @@ async function getProjectById(db, id, scopeCodeUker = null) {
         AND (@scopeCodeUker IS NULL OR mu.codeuker = @scopeCodeUker);
     `)
 
-  return result.recordset[0] || null
+  const item = result.recordset[0] || null
+  return item
+    ? { ...item, row_version: normalizeRowVersionToken(item.row_version) }
+    : null
 }
 
 async function isProjectCodeAvailable(db, kodeProject, ignoredId = null) {
@@ -439,7 +445,7 @@ function addProjectPayloadInputs(dbRequest, data) {
 }
 
 export async function GET(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "view")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -578,6 +584,7 @@ export async function GET(request) {
         p.progress,
         p.keterangan,
         p.is_active,
+        p.row_version,
         p.created_at,
         p.updated_at
       FROM dbo.master_project p
@@ -594,7 +601,10 @@ export async function GET(request) {
     return NextResponse.json({
       success: true,
       data: {
-        projects: listResult.recordset,
+        projects: listResult.recordset.map((item) => ({
+          ...item,
+          row_version: normalizeRowVersionToken(item.row_version),
+        })),
         summary,
         pagination: {
           page: currentPage,
@@ -621,7 +631,7 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "create")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -695,8 +705,18 @@ export async function POST(request) {
       );
     `)
 
-    const createdId = result.recordset[0]?.id
+    const createdId = Number(result.recordset[0]?.id)
     const createdProject = await getProjectById(db, createdId)
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "CREATE",
+      module: "masters.project",
+      entityType: "master_project",
+      entityId: createdId,
+      metadata: { after: createdProject },
+    })
 
     return NextResponse.json(
       {
@@ -731,7 +751,7 @@ export async function POST(request) {
 }
 
 export async function PUT(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "update")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -754,11 +774,26 @@ export async function PUT(request) {
       return createErrorResponse(validation.error)
     }
 
+    const requestedRowVersion = normalizeRowVersionToken(body.row_version)
+    if (!requestedRowVersion) {
+      return createErrorResponse(
+        "Versi data project tidak tersedia. Muat ulang sebelum menyimpan.",
+        409
+      )
+    }
+
     const db = await connectDB()
     const existingProject = await getProjectById(db, id)
 
     if (!existingProject) {
       return createErrorResponse("Data project tidak ditemukan.", 404)
+    }
+
+    if (requestedRowVersion !== normalizeRowVersionToken(existingProject.row_version)) {
+      return createErrorResponse(
+        "Data project telah berubah oleh pengguna lain. Muat ulang sebelum menyimpan.",
+        409
+      )
     }
 
     const uker = await getUkerById(db, validation.data.ukerId)
@@ -780,8 +815,13 @@ export async function PUT(request) {
       )
     }
 
-    await addProjectPayloadInputs(db.request(), validation.data)
+    const updateResult = await addProjectPayloadInputs(db.request(), validation.data)
       .input("id", sql.BigInt, id)
+      .input(
+        "rowVersion",
+        sql.VarBinary(8),
+        Buffer.from(requestedRowVersion.slice(2), "hex")
+      )
       .query(`
         UPDATE dbo.master_project
         SET
@@ -799,10 +839,31 @@ export async function PUT(request) {
           keterangan = @keterangan,
           is_active = @isActive,
           updated_at = SYSDATETIME()
-        WHERE id = @id;
+        WHERE id = @id
+          AND row_version = @rowVersion;
       `)
 
+    if (Number(updateResult.rowsAffected?.[0] || 0) === 0) {
+      return createErrorResponse(
+        "Data project telah berubah oleh pengguna lain. Muat ulang sebelum menyimpan.",
+        409
+      )
+    }
+
     const updatedProject = await getProjectById(db, id)
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "UPDATE",
+      module: "masters.project",
+      entityType: "master_project",
+      entityId: id,
+      metadata: {
+        before: existingProject,
+        after: updatedProject,
+      },
+    })
 
     return NextResponse.json({
       success: true,
@@ -834,7 +895,7 @@ export async function PUT(request) {
 }
 
 export async function DELETE(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "delete")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -862,6 +923,16 @@ export async function DELETE(request) {
       .request()
       .input("id", sql.BigInt, id)
       .query(`DELETE FROM dbo.master_project WHERE id = @id;`)
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "DELETE",
+      module: "masters.project",
+      entityType: "master_project",
+      entityId: id,
+      metadata: { before: existingProject },
+    })
 
     return NextResponse.json({
       success: true,

@@ -5,6 +5,9 @@ import {
   getUserDataScope,
 } from "@/lib/access-control"
 import { connectDB, sql } from "@/lib/mssql"
+import { normalizePositiveInteger } from "@/lib/database/pagination"
+import { normalizeRowVersionToken } from "@/modules/master-mesin/row-version"
+import { writeAuditLog } from "@/lib/security/audit-log"
 import {
   deleteManagedPegawaiPhoto,
   preparePegawaiPhoto,
@@ -97,6 +100,7 @@ async function parsePegawaiRequest(request) {
         tgl_job: formData.get("tgl_job"),
         foto: formData.get("foto"),
         uker_id: formData.get("uker_id"),
+        row_version: formData.get("row_version"),
       },
       photoFile: formData.get("foto_file"),
       removePhoto: normalizeBoolean(formData.get("remove_photo"), false),
@@ -247,8 +251,8 @@ function getSqlErrorNumber(error) {
   )
 }
 
-async function authorizeMaster(request) {
-  return authorizeApiRequest(request, "/masters")
+async function authorizeMaster(request, action = "view") {
+  return authorizeApiRequest(request, "/masters", action)
 }
 
 function requireSuperAdmin(authorization) {
@@ -327,6 +331,7 @@ async function getPegawaiById(db, id) {
         mu.nama_uker,
         p.created_at,
         p.updated_at,
+        CONVERT(VARCHAR(18), CONVERT(VARBINARY(8), p.row_version), 1) AS row_version,
         linked_user.id AS user_id,
         linked_user.username,
         linked_user.role_code,
@@ -349,7 +354,8 @@ async function getPegawaiById(db, id) {
       WHERE p.id = @id;
     `)
 
-  return result.recordset[0] || null
+  const item = result.recordset[0] || null
+  return item ? { ...item, row_version: normalizeRowVersionToken(item.row_version) } : null
 }
 
 async function isNipAvailable(db, nip, ignoredId = null) {
@@ -431,7 +437,7 @@ async function countOtherActiveSuperAdmins(db, ignoredUserId) {
 }
 
 export async function GET(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "view")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -448,54 +454,142 @@ export async function GET(request) {
       )
     }
 
-    const result = await db
-      .request()
-      .input("codeUker", sql.NVarChar(20), scope.codeUker)
-      .query(`
-        SELECT
-          p.id,
-          p.nip,
-          p.ktp,
-          p.nama,
-          p.alamat,
-          p.jabatan,
-          p.handphone,
-          p.email,
-          p.status,
-          p.status_peg,
-          CONVERT(CHAR(10), p.tgl_lahir, 23) AS tgl_lahir,
-          CONVERT(CHAR(10), p.tgl_job, 23) AS tgl_job,
-          p.foto,
-          p.uker_id,
-          mu.codeuker,
-          mu.nama_uker,
-          p.created_at,
-          p.updated_at,
-          linked_user.id AS user_id,
-          linked_user.username,
-          linked_user.role_name,
-          linked_user.is_active AS user_is_active
+    const { searchParams } = new URL(request.url)
+    const page = normalizePositiveInteger(searchParams.get("page"), 1, 1000000)
+    const pageSize = normalizePositiveInteger(searchParams.get("page_size"), 10, 100)
+    const offset = (page - 1) * pageSize
+    const search = normalizeText(searchParams.get("search"))
+    const ukerId = normalizeId(searchParams.get("uker_id"))
+    const statusParam = normalizeText(searchParams.get("status")).toUpperCase()
+    const status = statusParam === "ACTIVE" ? 1 : statusParam === "INACTIVE" ? 0 : null
+
+    const addCommonInputs = (dbRequest) =>
+      dbRequest
+        .input("codeUker", sql.NVarChar(4), scope.codeUker)
+        .input("search", sql.NVarChar(255), search ? `%${search}%` : null)
+        .input("ukerId", sql.BigInt, ukerId)
+        .input("status", sql.Bit, status)
+
+    const whereClause = `
+      WHERE (@codeUker IS NULL OR mu.codeuker = @codeUker)
+        AND (@ukerId IS NULL OR p.uker_id = @ukerId)
+        AND (@status IS NULL OR p.status = @status)
+        AND (
+          @search IS NULL
+          OR p.nip LIKE @search
+          OR p.ktp LIKE @search
+          OR p.nama LIKE @search
+          OR p.alamat LIKE @search
+          OR p.jabatan LIKE @search
+          OR p.handphone LIKE @search
+          OR p.email LIKE @search
+          OR p.status_peg LIKE @search
+          OR mu.codeuker LIKE @search
+          OR mu.nama_uker LIKE @search
+          OR EXISTS (
+            SELECT 1
+            FROM dbo.users search_user
+            WHERE search_user.pegawai_id = p.id
+              AND search_user.username LIKE @search
+          )
+        )
+    `
+
+    const [listResult, countResult, summaryResult] = await Promise.all([
+      addCommonInputs(db.request())
+        .input("offset", sql.Int, offset)
+        .input("pageSize", sql.Int, pageSize)
+        .query(`
+          SELECT
+            p.id,
+            p.nip,
+            p.ktp,
+            p.nama,
+            p.alamat,
+            p.jabatan,
+            p.handphone,
+            p.email,
+            p.status,
+            p.status_peg,
+            CONVERT(CHAR(10), p.tgl_lahir, 23) AS tgl_lahir,
+            CONVERT(CHAR(10), p.tgl_job, 23) AS tgl_job,
+            p.foto,
+            p.uker_id,
+            mu.codeuker,
+            mu.nama_uker,
+            p.created_at,
+            p.updated_at,
+            CONVERT(VARCHAR(18), CONVERT(VARBINARY(8), p.row_version), 1) AS row_version,
+            linked_user.id AS user_id,
+            linked_user.username,
+            linked_user.role_name,
+            linked_user.is_active AS user_is_active
+          FROM dbo.pegawai p
+          INNER JOIN dbo.master_uker mu ON mu.id = p.uker_id
+          OUTER APPLY (
+            SELECT TOP 1
+              u.id,
+              u.username,
+              r.role_name,
+              u.is_active
+            FROM dbo.users u
+            INNER JOIN dbo.roles r ON r.id = u.role_id
+            WHERE u.pegawai_id = p.id
+            ORDER BY u.id
+          ) linked_user
+          ${whereClause}
+          ORDER BY p.nama ASC, p.nip ASC, p.id ASC
+          OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;
+        `),
+      addCommonInputs(db.request()).query(`
+        SELECT COUNT_BIG(*) AS total
         FROM dbo.pegawai p
         INNER JOIN dbo.master_uker mu ON mu.id = p.uker_id
-        OUTER APPLY (
-          SELECT TOP 1
-            u.id,
-            u.username,
-            r.role_name,
-            u.is_active
-          FROM dbo.users u
-          INNER JOIN dbo.roles r ON r.id = u.role_id
-          WHERE u.pegawai_id = p.id
-          ORDER BY u.id
-        ) linked_user
-        WHERE @codeUker IS NULL OR mu.codeuker = @codeUker
-        ORDER BY p.nama ASC, p.nip ASC, p.id ASC;
-      `)
+        ${whereClause};
+      `),
+      db.request()
+        .input("codeUker", sql.NVarChar(4), scope.codeUker)
+        .query(`
+          SELECT
+            COUNT_BIG(*) AS total,
+            SUM(CASE WHEN p.status = 1 THEN 1 ELSE 0 END) AS active,
+            SUM(CASE WHEN linked_user.user_id IS NOT NULL THEN 1 ELSE 0 END) AS linked,
+            SUM(CASE WHEN p.email IS NULL OR LTRIM(RTRIM(p.email)) = '' THEN 1 ELSE 0 END) AS without_email
+          FROM dbo.pegawai p
+          INNER JOIN dbo.master_uker mu ON mu.id = p.uker_id
+          OUTER APPLY (
+            SELECT TOP 1 u.id AS user_id
+            FROM dbo.users u
+            WHERE u.pegawai_id = p.id
+            ORDER BY u.id
+          ) linked_user
+          WHERE @codeUker IS NULL OR mu.codeuker = @codeUker;
+        `),
+    ])
+
+    const total = Number(countResult.recordset[0]?.total || 0)
+    const totalPages = Math.max(1, Math.ceil(total / pageSize))
+    const summaryRow = summaryResult.recordset[0] || {}
 
     return NextResponse.json({
       success: true,
       data: {
-        pegawai: result.recordset,
+        pegawai: listResult.recordset.map((item) => ({
+          ...item,
+          row_version: normalizeRowVersionToken(item.row_version),
+        })),
+        pagination: {
+          page,
+          page_size: pageSize,
+          total,
+          total_pages: totalPages,
+        },
+        summary: {
+          total: Number(summaryRow.total || 0),
+          active: Number(summaryRow.active || 0),
+          linked: Number(summaryRow.linked || 0),
+          withoutEmail: Number(summaryRow.without_email || 0),
+        },
         scope: {
           isSuperAdmin: scope.isSuperAdmin,
           codeuker: scope.codeUker,
@@ -504,12 +598,27 @@ export async function GET(request) {
     })
   } catch (error) {
     console.error("GET master pegawai error:", error)
+
+    const details = getServerErrorMessage(error)
+    if (
+      getSqlErrorNumber(error) === 207 &&
+      /(?:^|[.\s])row_version(?:$|[.\s])/i.test(details)
+    ) {
+      return createErrorResponse(
+        "Struktur database Pegawai belum diperbarui. Jalankan `npm run db:migrate` untuk menerapkan migration 024-add-pegawai-row-version.sql.",
+        503,
+        process.env.NODE_ENV !== "production"
+          ? { migration: "024-add-pegawai-row-version.sql" }
+          : {}
+      )
+    }
+
     return createInternalErrorResponse(error, "Gagal mengambil data pegawai.")
   }
 }
 
 export async function POST(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "create")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -616,6 +725,27 @@ export async function POST(request) {
     databaseWritten = true
     const createdPegawai = await getPegawaiById(db, createdId)
 
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "CREATE",
+      module: "masters.pegawai",
+      entityType: "pegawai",
+      entityId: createdId,
+      metadata: {
+        after: {
+          nip: createdPegawai?.nip,
+          nama: createdPegawai?.nama,
+          jabatan: createdPegawai?.jabatan,
+          status: createdPegawai?.status,
+          status_peg: createdPegawai?.status_peg,
+          uker_id: createdPegawai?.uker_id,
+          codeuker: createdPegawai?.codeuker,
+          has_photo: Boolean(createdPegawai?.foto),
+        },
+      },
+    })
+
     return NextResponse.json(
       {
         success: true,
@@ -649,7 +779,7 @@ export async function POST(request) {
 }
 
 export async function PUT(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "update")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -672,6 +802,17 @@ export async function PUT(request) {
     const validation = validatePegawaiPayload(parsedRequest.body)
     if (validation.error) return createErrorResponse(validation.error)
 
+    const requestedRowVersion = normalizeRowVersionToken(
+      parsedRequest.body.row_version
+    )
+
+    if (!requestedRowVersion) {
+      return createErrorResponse(
+        "Versi data pegawai tidak tersedia. Muat ulang data sebelum menyimpan.",
+        409
+      )
+    }
+
     const photoValidation = await preparePegawaiPhoto(parsedRequest.photoFile)
 
     if (photoValidation.error) {
@@ -683,6 +824,13 @@ export async function PUT(request) {
 
     if (!existingPegawai) {
       return createErrorResponse("Data pegawai tidak ditemukan.", 404)
+    }
+
+    if (requestedRowVersion !== normalizeRowVersionToken(existingPegawai.row_version)) {
+      return createErrorResponse(
+        "Data pegawai telah berubah oleh pengguna lain. Muat ulang sebelum menyimpan.",
+        409
+      )
     }
 
     const uker = await getUkerById(db, validation.data.ukerId)
@@ -731,8 +879,13 @@ export async function PUT(request) {
     await transaction.begin()
 
     try {
-      await new sql.Request(transaction)
+      const updatePegawaiResult = await new sql.Request(transaction)
         .input("id", sql.Int, id)
+        .input(
+          "rowVersion",
+          sql.VarBinary(8),
+          Buffer.from(requestedRowVersion.slice(2), "hex")
+        )
         .input("nip", sql.VarChar(50), validation.data.nip)
         .input("ktp", sql.VarChar(50), validation.data.ktp)
         .input("nama", sql.VarChar(100), validation.data.nama)
@@ -763,8 +916,16 @@ export async function PUT(request) {
             foto = @foto,
             uker_id = @ukerId,
             updated_at = SYSDATETIME()
-          WHERE id = @id;
+          WHERE id = @id
+            AND row_version = @rowVersion;
         `)
+
+      if (Number(updatePegawaiResult.rowsAffected?.[0] || 0) === 0) {
+        throw Object.assign(
+          new Error("Data pegawai telah berubah oleh pengguna lain."),
+          { code: "ROW_VERSION_CONFLICT" }
+        )
+      }
 
       await new sql.Request(transaction)
         .input("pegawaiId", sql.Int, id)
@@ -808,6 +969,37 @@ export async function PUT(request) {
 
     const updatedPegawai = await getPegawaiById(db, id)
 
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "UPDATE",
+      module: "masters.pegawai",
+      entityType: "pegawai",
+      entityId: id,
+      metadata: {
+        before: {
+          nip: existingPegawai.nip,
+          nama: existingPegawai.nama,
+          jabatan: existingPegawai.jabatan,
+          status: existingPegawai.status,
+          status_peg: existingPegawai.status_peg,
+          uker_id: existingPegawai.uker_id,
+          codeuker: existingPegawai.codeuker,
+          has_photo: Boolean(existingPegawai.foto),
+        },
+        after: {
+          nip: updatedPegawai?.nip,
+          nama: updatedPegawai?.nama,
+          jabatan: updatedPegawai?.jabatan,
+          status: updatedPegawai?.status,
+          status_peg: updatedPegawai?.status_peg,
+          uker_id: updatedPegawai?.uker_id,
+          codeuker: updatedPegawai?.codeuker,
+          has_photo: Boolean(updatedPegawai?.foto),
+        },
+      },
+    })
+
     if (existingPegawai.foto && existingPegawai.foto !== photoPath) {
       try {
         await deleteManagedPegawaiPhoto(existingPegawai.foto)
@@ -836,6 +1028,13 @@ export async function PUT(request) {
       return createErrorResponse("Format data tidak valid.")
     }
 
+    if (error?.code === "ROW_VERSION_CONFLICT") {
+      return createErrorResponse(
+        "Data pegawai telah berubah oleh pengguna lain. Muat ulang sebelum menyimpan.",
+        409
+      )
+    }
+
     const sqlErrorNumber = getSqlErrorNumber(error)
     if (sqlErrorNumber === 2601 || sqlErrorNumber === 2627) {
       return createErrorResponse("NIP, nomor KTP, atau email sudah digunakan.", 409)
@@ -846,7 +1045,7 @@ export async function PUT(request) {
 }
 
 export async function DELETE(request) {
-  const authorization = await authorizeMaster(request)
+  const authorization = await authorizeMaster(request, "delete")
 
   if (!authorization.authorized) {
     return authorization.response
@@ -934,6 +1133,29 @@ export async function DELETE(request) {
       await transaction.rollback()
       throw error
     }
+
+    await writeAuditLog({
+      request,
+      userId: authorization.user.id,
+      action: "DELETE",
+      module: "masters.pegawai",
+      entityType: "pegawai",
+      entityId: id,
+      metadata: {
+        before: {
+          nip: existingPegawai.nip,
+          nama: existingPegawai.nama,
+          jabatan: existingPegawai.jabatan,
+          status: existingPegawai.status,
+          status_peg: existingPegawai.status_peg,
+          uker_id: existingPegawai.uker_id,
+          codeuker: existingPegawai.codeuker,
+          linked_user_id: existingPegawai.user_id || null,
+          linked_username: existingPegawai.username || null,
+          linked_user_deleted: Boolean(existingPegawai.user_id),
+        },
+      },
+    })
 
     if (existingPegawai.foto) {
       try {

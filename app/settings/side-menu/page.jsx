@@ -17,6 +17,7 @@ const EMPTY_FORM = {
   badge: "",
   sort_order: "",
   is_active: true,
+  row_version: "",
 }
 
 const ICON_OPTIONS = [
@@ -366,6 +367,7 @@ export default function SideMenuMaintenancePage() {
         menu.sort_order || ""
       ),
       is_active: Boolean(menu.is_active),
+      row_version: String(menu.row_version || ""),
     })
 
     setModalErrorMessage("")
@@ -403,6 +405,7 @@ export default function SideMenuMaintenancePage() {
         badge: form.badge.trim(),
         sort_order: Number(form.sort_order),
         is_active: form.is_active,
+        row_version: form.row_version,
       }
 
       const response = await fetch(

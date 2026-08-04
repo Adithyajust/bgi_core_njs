@@ -3,12 +3,14 @@
 import Link from "next/link"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
+import { useAppBootstrap } from "@/components/app-bootstrap-context"
 
 const EMPTY_FORM = {
   merk_id: "",
   jenis_mesin: "",
   nama_model: "",
   is_active: true,
+  row_version: "",
 }
 
 function formatDateTime(value) {
@@ -64,6 +66,7 @@ function mapToForm(item) {
     jenis_mesin: String(item?.jenis_mesin || ""),
     nama_model: String(item?.nama_model || ""),
     is_active: Boolean(item?.is_active),
+    row_version: String(item?.row_version || ""),
   }
 }
 
@@ -73,9 +76,9 @@ function getErrorMessage(error, fallback) {
 
 export default function MasterTipeMesinPage() {
   const router = useRouter()
+  const { user: currentUser } = useAppBootstrap()
   const toastTimerRef = useRef(null)
 
-  const [currentUser, setCurrentUser] = useState(null)
   const [merkOptions, setMerkOptions] = useState([])
   const [tipeMesins, setTipeMesins] = useState([])
   const [summary, setSummary] = useState({
@@ -129,19 +132,12 @@ export default function MasterTipeMesinPage() {
 
     async function loadIdentityAndOptions() {
       try {
-        const [userResult, merkResult] = await Promise.all([
-          requestJson("/api/auth/me", {
-            method: "GET",
-            signal: controller.signal,
-          }),
-          requestJson("/api/masters/merk?mode=options&include_inactive=true", {
-            method: "GET",
-            signal: controller.signal,
-          }),
-        ])
+        const merkResult = await requestJson(
+          "/api/masters/merk?mode=options&include_inactive=true",
+          { method: "GET", signal: controller.signal }
+        )
 
         if (!controller.signal.aborted) {
-          setCurrentUser(userResult.data)
           setMerkOptions(
             Array.isArray(merkResult.data?.merks)
               ? merkResult.data.merks
@@ -385,6 +381,7 @@ export default function MasterTipeMesinPage() {
         jenis_mesin: form.jenis_mesin.trim(),
         nama_model: form.nama_model.trim(),
         is_active: form.is_active,
+        row_version: form.row_version,
       }
 
       const result = await requestJson("/api/masters/tipe-mesin", {
