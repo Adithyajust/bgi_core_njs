@@ -6,8 +6,13 @@ import { useRouter } from "next/navigation"
 
 import { ReplenishAutocomplete } from "@/components/replenish-autocomplete"
 import { useAppBootstrap } from "@/components/app-bootstrap-context"
-import { isReplenishTeamApprover } from "@/modules/replenish/authorization"
-import { REPLENISH_MAKER_CANCELLABLE_STATUSES } from "@/modules/replenish/constants"
+import { isReplenishKeyHandoverPrinter, isReplenishTeamApprover } from "@/modules/replenish/authorization"
+import {
+  hasReplenishReachedApproval,
+  REPLENISH_MAKER_CANCELLABLE_STATUSES,
+  REPLENISH_PAGU_OPTIONS,
+} from "@/modules/replenish/constants"
+import { calculatePointRequirements } from "@/modules/replenish/calculation"
 
 const ACTIVITY_OPTIONS = [
   { value: "NORMAL", label: "Replenish Normal" },
@@ -25,6 +30,10 @@ const STATUS_OPTIONS = [
   "DIBATALKAN",
 ]
 
+function isApprovedWorkOrderStatus(value) {
+  return hasReplenishReachedApproval(value)
+}
+
 function todayString() {
   const date = new Date()
   const timezoneOffset = date.getTimezoneOffset() * 60_000
@@ -34,7 +43,6 @@ function todayString() {
 function emptyForm() {
   return {
     uker: null,
-    activity_type: "NORMAL",
     schedule_date: todayString(),
     departure_time: "08:00",
     estimated_finish_time: "17:00",
@@ -49,13 +57,44 @@ function emptyForm() {
   }
 }
 
+function replenishCompatibilityUrl(url) {
+  const rawUrl = String(url || "")
+  const [pathname, rawQuery = ""] = rawUrl.split("?", 2)
+  const match = pathname.match(
+    /^\/api\/transactions\/replenish\/(\d+)\/(key-handover(?:\/pdf)?|surat-tugas(?:\/pdf)?)\/?$/
+  )
+  if (!match) return null
+
+  const [, workOrderId, resourcePath] = match
+  const resource = resourcePath === "key-handover"
+    ? "key-handover"
+    : resourcePath === "key-handover/pdf"
+      ? "key-handover-pdf"
+      : resourcePath === "surat-tugas/pdf"
+        ? "surat-tugas-pdf"
+        : "surat-tugas"
+  const params = new URLSearchParams(rawQuery)
+  params.set("resource", resource)
+  return `/api/transactions/replenish/${workOrderId}?${params.toString()}`
+}
+
 async function requestJson(url, options = {}) {
-  const response = await fetch(url, {
+  const fetchOptions = {
     credentials: "include",
     cache: "no-store",
     ...options,
-  })
-  const contentType = response.headers.get("content-type") || ""
+  }
+  let response = await fetch(url, fetchOptions)
+  let contentType = response.headers.get("content-type") || ""
+
+  if (response.status === 404 && !contentType.includes("application/json")) {
+    const compatibilityUrl = replenishCompatibilityUrl(url)
+    if (compatibilityUrl) {
+      response = await fetch(compatibilityUrl, fetchOptions)
+      contentType = response.headers.get("content-type") || ""
+    }
+  }
+
   if (!contentType.includes("application/json")) {
     throw new Error(`Endpoint tidak mengembalikan JSON. Status ${response.status}.`)
   }
@@ -101,6 +140,7 @@ function titleCaseStatus(value) {
 }
 
 function activityLabel(value) {
+  if (value === "CAMPURAN") return "Aktivitas per point"
   return ACTIVITY_OPTIONS.find((item) => item.value === value)?.label || value
 }
 
@@ -109,6 +149,42 @@ function statusClass(status) {
   if (["DITOLAK", "GAGAL", "DIBATALKAN"].includes(status)) return "danger"
   if (["MENUNGGU_PERSETUJUAN_TIM", "DARURAT"].includes(status)) return "warning"
   return "neutral"
+}
+
+const ASSIGNMENT_LETTER_BLOCKED_STATUSES = new Set(["DIBATALKAN"])
+const KEY_SCAN_MIN_LENGTH = 6
+const KEY_SCAN_IDLE_MS = 160
+
+function canOpenAssignmentLetter(status) {
+  const normalized = String(status || "").trim().toUpperCase()
+  return Boolean(normalized) && !ASSIGNMENT_LETTER_BLOCKED_STATUSES.has(normalized)
+}
+
+
+function validateWorkOrderForm(form) {
+  if (!form.uker?.value) return "Unit kerja wajib dipilih."
+  if (!form.schedule_date) return "Tanggal kegiatan wajib diisi."
+  if (!form.departure_time) return "Jam keberangkatan wajib diisi."
+  if (!form.estimated_finish_time) return "Estimasi selesai wajib diisi."
+  if (!form.vehicle?.value) return "Kendaraan operasional wajib dipilih."
+  if (!form.custody?.value) return "Custody wajib dipilih dari master pegawai."
+  if (!form.driver?.value) return "Pengemudi wajib dipilih dari master pegawai."
+  if (String(form.custody.value) === String(form.driver.value)) {
+    return "Custody dan Pengemudi harus orang yang berbeda."
+  }
+  if (!form.escort_name.trim()) return "Nama Petugas Pengawalan wajib diisi."
+  if (form.points.length === 0) return "Minimal satu ATM/CRM harus dipilih."
+
+  for (let index = 0; index < form.points.length; index += 1) {
+    const point = form.points[index]
+    if (!point.machine?.value) return `ATM/CRM pada urutan ${index + 1} tidak valid.`
+    if (!point.activity_type) return `Jenis aktivitas pada urutan ${index + 1} wajib dipilih.`
+    if (point.activity_type !== "PENGOSONGAN" && !point.pagu) {
+      return `Pagu pada ATM/CRM urutan ${index + 1} wajib dipilih.`
+    }
+  }
+
+  return ""
 }
 
 function mapDetailToForm(workOrder) {
@@ -137,7 +213,6 @@ function mapDetailToForm(workOrder) {
         nama_uker: workOrder.nama_uker,
       },
     },
-    activity_type: workOrder.activity_type,
     schedule_date: workOrder.schedule_date,
     departure_time: workOrder.departure_time,
     estimated_finish_time: workOrder.estimated_finish_time,
@@ -150,18 +225,40 @@ function mapDetailToForm(workOrder) {
     custody: employeeOption("CUSTODY"),
     driver: employeeOption("PENGEMUDI"),
     escort_name: workOrder.escort_name || "",
-    points: (workOrder.points || []).map((point) => ({
-      machine: {
-        value: String(point.machine_id),
-        label: `${point.tid || point.sn} · ${point.lokasi}`,
-        data: point,
-      },
-      requested_amount:
-        point.requested_amount === null || point.requested_amount === undefined
-          ? ""
-          : String(point.requested_amount),
-      notes: point.notes || "",
-    })),
+    points: (workOrder.points || []).map((point) => {
+      const activityType = point.activity_type || workOrder.activity_type || "NORMAL"
+      const isPengosongan = activityType === "PENGOSONGAN"
+      const calculation = !isPengosongan && point.pagu
+        ? calculatePointRequirements(point.pagu, point.denomination_value || point.denom)
+        : null
+
+      return {
+        machine: {
+          value: String(point.machine_id),
+          label: `${point.tid || point.sn} · ${point.lokasi}${point.denom ? ` · Denom ${point.denom}` : ""}`,
+          data: point,
+        },
+        activity_type: activityType,
+        pagu: !isPengosongan && point.pagu ? String(point.pagu) : "",
+        requested_amount:
+          isPengosongan
+            ? ""
+            : point.requested_amount === null || point.requested_amount === undefined
+            ? calculation?.requestedAmount
+              ? String(calculation.requestedAmount)
+              : ""
+            : String(point.requested_amount),
+        cassette_count:
+          isPengosongan
+            ? ""
+            : point.required_cassettes === null || point.required_cassettes === undefined
+            ? calculation?.cassetteCount
+              ? String(calculation.cassetteCount)
+              : ""
+            : String(point.required_cassettes),
+        notes: point.notes || "",
+      }
+    }),
     route_notes: workOrder.route_notes || "",
     notes: workOrder.notes || "",
   }
@@ -171,7 +268,11 @@ export default function ReplenishPage() {
   const router = useRouter()
   const { user, permissions } = useAppBootstrap()
   const toastTimer = useRef(null)
-  const approvalFilterInitialized = useRef(false)
+  const createIdempotencyKey = useRef(null)
+  const keyScanInputRef = useRef(null)
+  const keyScanTimerRef = useRef(null)
+  const detailBodyRef = useRef(null)
+  const keyHandoverPdfViewerRef = useRef(null)
 
   const [workOrders, setWorkOrders] = useState([])
   const [summary, setSummary] = useState({
@@ -183,6 +284,7 @@ export default function ReplenishPage() {
     total_requested_amount: 0,
   })
   const [scope, setScope] = useState(null)
+  const [transactionCapabilities, setTransactionCapabilities] = useState(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState("")
   const [refreshKey, setRefreshKey] = useState(0)
@@ -202,13 +304,22 @@ export default function ReplenishPage() {
   const [modalOpen, setModalOpen] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [form, setForm] = useState(emptyForm)
-  const [machineCandidate, setMachineCandidate] = useState(null)
   const [saving, setSaving] = useState(false)
   const [modalError, setModalError] = useState("")
 
   const [detailOpen, setDetailOpen] = useState(false)
   const [detail, setDetail] = useState(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [keyHandover, setKeyHandover] = useState(null)
+  const [keyHandoverLoading, setKeyHandoverLoading] = useState(false)
+  const [keyHandoverError, setKeyHandoverError] = useState("")
+  const [keyScanBarcode, setKeyScanBarcode] = useState("")
+  const [keyScanBusy, setKeyScanBusy] = useState(false)
+  const [keyPrintBusy, setKeyPrintBusy] = useState(false)
+  const [keyHandoverPdf, setKeyHandoverPdf] = useState(null)
+  const [keyHandoverPdfVisible, setKeyHandoverPdfVisible] = useState(false)
+  const [assignmentPrintStatus, setAssignmentPrintStatus] = useState(null)
+  const [assignmentPrintLoading, setAssignmentPrintLoading] = useState(false)
   const [actionLoadingId, setActionLoadingId] = useState(null)
 
   const [toast, setToast] = useState({ open: false, type: "success", message: "" })
@@ -216,6 +327,23 @@ export default function ReplenishPage() {
   const isSuperAdmin = user?.roleCode === "SUPER_ADMIN"
   const transactionPermission = permissions?.["/transactions"] || null
   const approvalRole = isReplenishTeamApprover(user)
+  const keyHandoverPrinterRole = isReplenishKeyHandoverPrinter(user)
+  // Cetak Serah Terima Kunci mengikuti capability transaksi, bukan hanya nama role.
+  // Ini menjaga role legacy/custom (User Admin / Manager Operasional) tetap bekerja
+  // selama memang diberi hak create/update pada menu Transactions.
+  const fallbackCanPrintKeyHandoverByAccess = Boolean(
+    isSuperAdmin ||
+    keyHandoverPrinterRole ||
+    transactionPermission?.canCreate ||
+    transactionPermission?.canUpdate
+  )
+  // Prioritaskan capability yang dihitung backend dari session, role aktual,
+  // permission DB, dan scope. Fallback hanya dipakai sebelum response list tiba.
+  const canPrintKeyHandoverByAccess = Boolean(
+    typeof transactionCapabilities?.can_print_key_handover === "boolean"
+      ? transactionCapabilities.can_print_key_handover
+      : fallbackCanPrintKeyHandoverByAccess
+  )
   const canCreate =
     (isSuperAdmin || Boolean(transactionPermission?.canCreate)) &&
     (isSuperAdmin || !approvalRole)
@@ -250,14 +378,17 @@ export default function ReplenishPage() {
     return () => window.clearTimeout(timer)
   }, [search])
 
+  // Manager Operasional tetap melihat seluruh status saat halaman dibuka agar
+  // Work Order yang sudah DISETUJUI (dan aksi cetaknya) tidak tersembunyi.
+  // Antrian approval tetap dapat dipilih secara eksplisit dari tombol filter.
   useEffect(() => {
-    if (!canApprove || approvalFilterInitialized.current) return
-    approvalFilterInitialized.current = true
-    setStatusFilter("MENUNGGU_PERSETUJUAN_TIM")
-  }, [canApprove])
-
-  useEffect(() => {
-    resetCursor()
+    let cancelled = false
+    queueMicrotask(() => {
+      if (!cancelled) resetCursor()
+    })
+    return () => {
+      cancelled = true
+    }
   }, [activityFilter, dateFrom, dateTo, debouncedSearch, statusFilter, ukerFilter])
 
   useEffect(() => {
@@ -284,6 +415,7 @@ export default function ReplenishPage() {
         setWorkOrders(result.data?.work_orders || [])
         setSummary(result.data?.summary || {})
         setScope(result.data?.scope || null)
+        setTransactionCapabilities(result.data?.capabilities || null)
         setPagination(result.data?.pagination || { has_more: false, next_cursor: null })
       })
       .catch((error) => {
@@ -317,15 +449,26 @@ export default function ReplenishPage() {
   ])
 
   useEffect(() => {
-    if (modalOpen && !isSuperAdmin && scope?.uker_id && !form.uker) {
-      setForm((current) => ({
-        ...current,
-        uker: {
-          value: String(scope.uker_id),
-          label: `${scope.codeuker || ""} · ${scope.nama_uker || "Unit Kerja"}`,
-          data: scope,
-        },
-      }))
+    if (!modalOpen || isSuperAdmin || !scope?.uker_id || form.uker) return undefined
+
+    let cancelled = false
+    queueMicrotask(() => {
+      if (cancelled) return
+      setForm((current) => {
+        if (current.uker) return current
+        return {
+          ...current,
+          uker: {
+            value: String(scope.uker_id),
+            label: `${scope.codeuker || ""} · ${scope.nama_uker || "Unit Kerja"}`,
+            data: scope,
+          },
+        }
+      })
+    })
+
+    return () => {
+      cancelled = true
     }
   }, [form.uker, isSuperAdmin, modalOpen, scope])
 
@@ -338,6 +481,16 @@ export default function ReplenishPage() {
       document.body.style.overflow = previous
     }
   }, [detailOpen, modalOpen])
+
+  useEffect(() => {
+    if (!detailOpen || !detail?.id) return undefined
+    const refreshPrerequisites = () => {
+      void loadAssignmentPrintStatus(detail.id, { silent: true })
+      void loadKeyHandover(detail.id, { silent: true })
+    }
+    window.addEventListener("focus", refreshPrerequisites)
+    return () => window.removeEventListener("focus", refreshPrerequisites)
+  }, [detail?.id, detailOpen])
 
   useEffect(() => () => {
     if (toastTimer.current) window.clearTimeout(toastTimer.current)
@@ -360,9 +513,9 @@ export default function ReplenishPage() {
         data: scope,
       }
     }
+    createIdempotencyKey.current = crypto.randomUUID()
     setEditingId(null)
     setForm(next)
-    setMachineCandidate(null)
     setModalError("")
     setModalOpen(true)
   }
@@ -376,9 +529,9 @@ export default function ReplenishPage() {
     setActionLoadingId(id)
     try {
       const result = await requestJson(`/api/transactions/replenish/${id}`)
+      createIdempotencyKey.current = null
       setEditingId(id)
       setForm(mapDetailToForm(result.data.work_order))
-      setMachineCandidate(null)
       setModalError("")
       setModalOpen(true)
     } catch (error) {
@@ -392,8 +545,8 @@ export default function ReplenishPage() {
     if (saving) return
     setModalOpen(false)
     setEditingId(null)
+    createIdempotencyKey.current = null
     setForm(emptyForm())
-    setMachineCandidate(null)
     setModalError("")
   }
 
@@ -407,27 +560,76 @@ export default function ReplenishPage() {
       escort_name: "",
       points: [],
     }))
-    setMachineCandidate(null)
   }
 
   function addMachine(option) {
     if (!option) return
+
+    if (form.points.some((point) => String(point.machine.value) === String(option.value))) {
+      setModalError("ATM/CRM tersebut sudah ditambahkan ke dalam urutan rute.")
+      return
+    }
+
+    if (form.points.length >= 50) {
+      setModalError("Maksimal 50 point ATM/CRM dalam satu work order.")
+      return
+    }
+
+    setModalError("")
     setForm((current) => ({
       ...current,
       points: [
         ...current.points,
-        { machine: option, requested_amount: "", notes: "" },
+        {
+          machine: option,
+          activity_type: "NORMAL",
+          pagu: "",
+          requested_amount: "",
+          cassette_count: "",
+          notes: "",
+        },
       ],
     }))
-    setMachineCandidate(null)
   }
 
   function updatePoint(index, field, value) {
     setForm((current) => ({
       ...current,
-      points: current.points.map((point, pointIndex) =>
-        pointIndex === index ? { ...point, [field]: value } : point
-      ),
+      points: current.points.map((point, pointIndex) => {
+        if (pointIndex !== index) return point
+
+        if (field === "activity_type") {
+          if (value === "PENGOSONGAN") {
+            return {
+              ...point,
+              activity_type: value,
+              pagu: "",
+              requested_amount: "",
+              cassette_count: "",
+            }
+          }
+
+          return { ...point, activity_type: value }
+        }
+
+        if (field !== "pagu") return { ...point, [field]: value }
+
+        const calculation = value
+          ? calculatePointRequirements(
+              value,
+              point.machine?.data?.denomination_value || point.machine?.data?.denom
+            )
+          : null
+
+        return {
+          ...point,
+          pagu: value,
+          requested_amount:
+            calculation && !calculation.error ? String(calculation.requestedAmount) : "",
+          cassette_count:
+            calculation && !calculation.error ? String(calculation.cassetteCount) : "",
+        }
+      }),
     }))
   }
 
@@ -438,11 +640,10 @@ export default function ReplenishPage() {
     }))
   }
 
-  async function handleSave(event) {
-    event.preventDefault()
+  async function handleSave(saveIntent = "DRAFT") {
     if (saving) return
 
-    const saveIntent = event.nativeEvent?.submitter?.value === "SUBMIT" ? "SUBMIT" : "DRAFT"
+    const normalizedSaveIntent = saveIntent === "SUBMIT" ? "SUBMIT" : "DRAFT"
     const allowed = editingId ? canUpdate : canCreate
     if (!allowed) {
       setModalError(
@@ -453,12 +654,17 @@ export default function ReplenishPage() {
       return
     }
 
+    const validationError = validateWorkOrderForm(form)
+    if (validationError) {
+      setModalError(validationError)
+      return
+    }
+
     setSaving(true)
     setModalError("")
 
     const payload = {
       uker_id: form.uker?.value || null,
-      activity_type: form.activity_type,
       schedule_date: form.schedule_date,
       departure_time: form.departure_time,
       estimated_finish_time: form.estimated_finish_time,
@@ -469,7 +675,8 @@ export default function ReplenishPage() {
       escort_name: form.escort_name,
       points: form.points.map((point) => ({
         machine_id: point.machine.value,
-        requested_amount: point.requested_amount,
+        activity_type: point.activity_type,
+        pagu: point.activity_type === "PENGOSONGAN" ? null : point.pagu,
         notes: point.notes,
       })),
       route_notes: form.route_notes,
@@ -483,13 +690,22 @@ export default function ReplenishPage() {
           : "/api/transactions/replenish",
         {
           method: editingId ? "PUT" : "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(editingId
+              ? {}
+              : {
+                  "Idempotency-Key":
+                    createIdempotencyKey.current ||
+                    (createIdempotencyKey.current = crypto.randomUUID()),
+                }),
+          },
           body: JSON.stringify(payload),
         }
       )
 
       let finalResult = saveResult
-      if (saveIntent === "SUBMIT") {
+      if (normalizedSaveIntent === "SUBMIT") {
         const savedWorkOrder = saveResult.data?.work_order
         if (!savedWorkOrder?.id) {
           throw new Error("Draft berhasil disimpan, tetapi identitas work order tidak tersedia untuk proses pengajuan.")
@@ -513,11 +729,11 @@ export default function ReplenishPage() {
 
       setModalOpen(false)
       setEditingId(null)
+      createIdempotencyKey.current = null
       setForm(emptyForm())
-      setMachineCandidate(null)
       showToast(
         "success",
-        saveIntent === "SUBMIT"
+        normalizedSaveIntent === "SUBMIT"
           ? `${finalResult.data?.work_order?.work_order_no || "Work order"} berhasil diajukan ke Manager Operasional.`
           : saveResult.message
       )
@@ -530,18 +746,266 @@ export default function ReplenishPage() {
     }
   }
 
+  async function loadKeyHandover(id, { silent = false } = {}) {
+    if (!silent) {
+      setKeyHandoverLoading(true)
+      setKeyHandoverError("")
+    }
+
+    try {
+      const result = await requestJson(`/api/transactions/replenish/${id}/key-handover`)
+      const snapshot = result.data?.key_handover || null
+      const storedPdf = result.data?.key_handover_pdf
+      setKeyHandover(snapshot)
+      setKeyHandoverPdf(storedPdf?.exists ? storedPdf : null)
+      setKeyHandoverError("")
+      return snapshot
+    } catch (error) {
+      setKeyHandover(null)
+      setKeyHandoverError(error.message)
+      return null
+    } finally {
+      if (!silent) setKeyHandoverLoading(false)
+    }
+  }
+
+  async function loadAssignmentPrintStatus(id, { silent = false } = {}) {
+    if (!silent) setAssignmentPrintLoading(true)
+    try {
+      const result = await requestJson(`/api/transactions/replenish/${id}/surat-tugas/pdf?status=1`)
+      const status = result.data || null
+      setAssignmentPrintStatus(status)
+      return status
+    } catch (error) {
+      setAssignmentPrintStatus({ exists: false, printed: false, error: error.message })
+      return null
+    } finally {
+      if (!silent) setAssignmentPrintLoading(false)
+    }
+  }
+
   async function openDetail(id) {
+    if (keyScanTimerRef.current) {
+      window.clearTimeout(keyScanTimerRef.current)
+      keyScanTimerRef.current = null
+    }
     setDetailOpen(true)
     setDetailLoading(true)
     setDetail(null)
+    setKeyHandover(null)
+    setKeyHandoverPdf(null)
+    setKeyHandoverPdfVisible(false)
+    setKeyHandoverError("")
+    setKeyScanBarcode("")
+    setAssignmentPrintStatus(null)
     try {
       const result = await requestJson(`/api/transactions/replenish/${id}`)
       setDetail(result.data.work_order)
+      await Promise.all([loadKeyHandover(id), loadAssignmentPrintStatus(id)])
+      window.setTimeout(() => keyScanInputRef.current?.focus({ preventScroll: true }), 80)
+      return result.data.work_order
     } catch (error) {
       showToast("error", error.message)
       setDetailOpen(false)
+      return null
     } finally {
       setDetailLoading(false)
+    }
+  }
+
+  function closeDetail() {
+    if (actionLoadingId || keyScanBusy || keyPrintBusy) return
+    if (keyScanTimerRef.current) {
+      window.clearTimeout(keyScanTimerRef.current)
+      keyScanTimerRef.current = null
+    }
+    setDetailOpen(false)
+    setDetail(null)
+    setKeyHandover(null)
+    setKeyHandoverPdf(null)
+    setKeyHandoverPdfVisible(false)
+    setKeyHandoverError("")
+    setKeyScanBarcode("")
+    setAssignmentPrintStatus(null)
+  }
+
+  function scheduleKeyScan(rawValue) {
+    const barcode = String(rawValue || "").toUpperCase().replaceAll(/\s+/g, "")
+    setKeyScanBarcode(barcode)
+    setKeyHandoverError("")
+
+    if (keyScanTimerRef.current) {
+      window.clearTimeout(keyScanTimerRef.current)
+      keyScanTimerRef.current = null
+    }
+
+    if (barcode.length < KEY_SCAN_MIN_LENGTH || keyScanBusy || keyPrintBusy) return
+
+    keyScanTimerRef.current = window.setTimeout(() => {
+      keyScanTimerRef.current = null
+      void handleKeyScan(barcode)
+    }, KEY_SCAN_IDLE_MS)
+  }
+
+  async function handleKeyScan(barcodeOverride = null) {
+    if (!detail?.id || keyScanBusy) return
+    if (keyScanTimerRef.current) {
+      window.clearTimeout(keyScanTimerRef.current)
+      keyScanTimerRef.current = null
+    }
+
+    const barcode = String(barcodeOverride || keyScanBarcode).trim().toUpperCase().replaceAll(/\s+/g, "")
+    if (!barcode) {
+      setKeyHandoverError("Scan barcode kunci terlebih dahulu.")
+      keyScanInputRef.current?.focus({ preventScroll: true })
+      return
+    }
+
+    const preservedScrollTop = detailBodyRef.current?.scrollTop ?? null
+    setKeyScanBusy(true)
+    setKeyHandoverError("")
+    try {
+      const result = await requestJson(`/api/transactions/replenish/${detail.id}/key-handover`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "SCAN", barcode }),
+      })
+      setKeyHandover(result.data?.key_handover || null)
+      setKeyScanBarcode("")
+      showToast("success", result.message)
+    } catch (error) {
+      setKeyScanBarcode("")
+      setKeyHandoverError(error.message)
+      showToast("error", error.message)
+    } finally {
+      setKeyScanBusy(false)
+      window.requestAnimationFrame(() => {
+        if (detailBodyRef.current && preservedScrollTop !== null) {
+          detailBodyRef.current.scrollTop = preservedScrollTop
+        }
+        keyScanInputRef.current?.focus({ preventScroll: true })
+      })
+    }
+  }
+
+  async function resetKeyHandoverScan() {
+    if (!detail?.id || keyScanBusy) return
+    if (keyScanTimerRef.current) {
+      window.clearTimeout(keyScanTimerRef.current)
+      keyScanTimerRef.current = null
+    }
+    const confirmed = window.confirm(`Reset seluruh scan kunci ${detail.work_order_no}?`)
+    if (!confirmed) return
+
+    setKeyScanBusy(true)
+    setKeyHandoverError("")
+    try {
+      const result = await requestJson(`/api/transactions/replenish/${detail.id}/key-handover`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "RESET" }),
+      })
+      setKeyHandover(result.data?.key_handover || null)
+      setKeyScanBarcode("")
+      showToast("success", result.message)
+    } catch (error) {
+      setKeyHandoverError(error.message)
+      showToast("error", error.message)
+    } finally {
+      setKeyScanBusy(false)
+      window.setTimeout(() => keyScanInputRef.current?.focus({ preventScroll: true }), 40)
+    }
+  }
+
+  async function printKeyHandoverDocument(workOrderId) {
+    if (!workOrderId || keyPrintBusy) return
+
+    setKeyPrintBusy(true)
+    setKeyHandoverError("")
+    try {
+      // Tombol pada tabel membuka Detail Work Order di halaman yang sama. Tombol
+      // di dalam detail langsung memakai modal aktif tanpa membuat tab/popup baru.
+      const currentDetailIsTarget = detailOpen && Number(detail?.id) === Number(workOrderId)
+      if (!currentDetailIsTarget) {
+        const openedDetail = await openDetail(workOrderId)
+        if (!openedDetail) return
+      }
+
+      // Pola status-first mengikuti Surat Tugas. Jika file PDF valid sudah ada,
+      // langsung baca dari private storage; PREPARE_PRINT hanya dijalankan saat
+      // file belum tersedia atau metadata lama sudah tidak sesuai snapshot.
+      const statusResult = await requestJson(
+        `/api/transactions/replenish/${workOrderId}/key-handover`
+      )
+      let snapshot = statusResult.data?.key_handover
+      let pdf = statusResult.data?.key_handover_pdf
+      const reusedStoredPdf = Boolean(
+        pdf?.exists &&
+        pdf?.template_current === true &&
+        pdf?.pdf_url &&
+        pdf?.pdf_hash &&
+        pdf?.document_hash
+      )
+
+      if (!reusedStoredPdf) {
+        const prepareResult = await requestJson(`/api/transactions/replenish/${workOrderId}/key-handover`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "PREPARE_PRINT" }),
+        })
+        snapshot = prepareResult.data?.key_handover
+        pdf = prepareResult.data?.key_handover_pdf
+      }
+
+      if (!snapshot?.summary?.can_print) {
+        throw new Error("Dokumen belum dapat dicetak karena scan kunci belum lengkap.")
+      }
+      if (!pdf?.pdf_url || !pdf?.pdf_hash || !pdf?.document_hash) {
+        throw new Error("PDF Serah Terima Kunci belum berhasil dibentuk oleh server.")
+      }
+
+      setKeyHandover(snapshot)
+      setKeyHandoverPdf(pdf)
+      setKeyHandoverPdfVisible(true)
+      window.setTimeout(() => {
+        keyHandoverPdfViewerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+      }, 120)
+      showToast(
+        "success",
+        reusedStoredPdf
+          ? "File PDF Serah Terima Kunci tersimpan berhasil dibaca dan ditampilkan di form Detail Work Order."
+          : "PDF Serah Terima Kunci berhasil dibentuk dan ditampilkan di form Detail Work Order. Cetak melalui toolbar PDF, lalu gunakan Konfirmasi Sudah Dicetak."
+      )
+    } catch (error) {
+      setKeyHandoverError(error.message)
+      showToast("error", error.message)
+    } finally {
+      setKeyPrintBusy(false)
+    }
+  }
+
+  async function confirmKeyHandoverPrinted(workOrderId) {
+    if (!workOrderId || keyPrintBusy) return
+    if (!window.confirm("Konfirmasi bahwa PDF Serah Terima Kunci yang tersimpan sudah berhasil dicetak?")) return
+
+    setKeyPrintBusy(true)
+    setKeyHandoverError("")
+    try {
+      const printedResult = await requestJson(`/api/transactions/replenish/${workOrderId}/key-handover`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "MARK_PRINTED" }),
+      })
+      setKeyHandover(printedResult.data?.key_handover || null)
+      if (printedResult.data?.key_handover_pdf?.exists) {
+        setKeyHandoverPdf(printedResult.data.key_handover_pdf)
+      }
+      showToast("success", printedResult.message)
+    } catch (error) {
+      setKeyHandoverError(error.message)
+      showToast("error", error.message)
+    } finally {
+      setKeyPrintBusy(false)
     }
   }
 
@@ -561,15 +1025,24 @@ export default function ReplenishPage() {
       if (!confirmed) return
     }
     if (action === "SUBMIT") {
+      if (detail?.id === item.id) {
+        if (!assignmentPrintStatus?.letter_ready) {
+          showToast("error", "Selesaikan Surat Tugas terlebih dahulu sebelum Work Order diajukan.")
+          return
+        }
+        if (!keyHandover?.summary?.all_scanned) {
+          const total = Number(keyHandover?.summary?.total_keys || detail?.total_points || 0)
+          const scanned = Number(keyHandover?.summary?.scanned_keys || 0)
+          showToast("error", `Scan kunci belum lengkap: ${scanned} dari ${total} kunci terverifikasi.`)
+          return
+        }
+      }
       const confirmed = window.confirm(`Ajukan ${item.work_order_no} untuk persetujuan?`)
       if (!confirmed) return
     }
 
     setActionLoadingId(item.id)
     try {
-      // Aksi lifecycle diproses terhadap row yang dikunci langsung di server.
-      // Browser tidak perlu mengirim row_version karena representasi Buffer/hex
-      // dapat berbeda antar versi driver SQL dan hasil serialisasi JSON.
       const result = await requestJson(`/api/transactions/replenish/${item.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -577,7 +1050,15 @@ export default function ReplenishPage() {
       })
       showToast("success", result.message)
       setRefreshKey((value) => value + 1)
-      if (detail?.id === item.id) setDetail(result.data.work_order)
+      if (detail?.id === item.id) {
+        setDetail(result.data.work_order)
+        if (["SUBMIT", "APPROVE"].includes(action)) {
+          await Promise.all([
+            loadKeyHandover(item.id, { silent: true }),
+            loadAssignmentPrintStatus(item.id, { silent: true }),
+          ])
+        }
+      }
     } catch (error) {
       showToast("error", error.message)
     } finally {
@@ -603,11 +1084,40 @@ export default function ReplenishPage() {
     0
   )
   const detailIsOwner = Number(detail?.created_by) === Number(user?.id)
-  const canSubmitDetail = Boolean(
+  const canManageDetailKeys = Boolean(
     detail &&
     canManageOwnDraft &&
     ["DRAFT", "DITOLAK"].includes(detail.status) &&
     (detailIsOwner || isSuperAdmin)
+  )
+  const canSubmitDetail = Boolean(
+    canManageDetailKeys &&
+    assignmentPrintStatus?.letter_ready &&
+    keyHandover?.summary?.all_scanned
+  )
+  // Pencetakan dokumen setelah approval mengikuti kepemilikan Work Order,
+  // bukan permission maker generik. Ini disamakan dengan endpoint Surat Tugas:
+  // Admin CRO pembuat Work Order (atau Super Admin) dapat mencetak setelah DISETUJUI.
+  const canPrintApprovedDocuments = Boolean(
+    detail &&
+    isApprovedWorkOrderStatus(detail.status) &&
+    (detailIsOwner || assignmentPrintStatus?.can_prepare || isSuperAdmin)
+  )
+  // Tombol Serah Terima Kunci tetap terlihat untuk user yang berhak.
+  // Status DISETUJUI menentukan enabled/disabled, bukan visibility tombol.
+  const canPrintApprovedKeyHandover = Boolean(
+    detail &&
+    (
+      detailIsOwner ||
+      canPrintKeyHandoverByAccess ||
+      keyHandover?.capabilities?.can_print_key_handover
+    )
+  )
+  // Tombol aktif segera setelah WO disetujui. Validasi snapshot scan tetap
+  // dilakukan server saat PREPARE_PRINT, sehingga kegagalan GET status scan
+  // atau perubahan mapping live tidak membuat tombol sah menjadi abu-abu.
+  const keyHandoverDetailPrintReady = Boolean(
+    detail && isApprovedWorkOrderStatus(detail.status)
   )
   const canCancelDetail = Boolean(
     detail &&
@@ -684,7 +1194,7 @@ export default function ReplenishPage() {
 
       {canCreate && !canApprove && (summary.draft || 0) > 0 ? (
         <div className="replenish-alert warning">
-          Terdapat <strong>{summary.draft}</strong> work order berstatus Draft. Gunakan tombol <strong>Ajukan</strong> pada tabel atau <strong>Simpan &amp; Ajukan</strong> pada form agar transaksi masuk ke antrian Manager Operasional.
+          Terdapat <strong>{summary.draft}</strong> work order berstatus Draft. Buka <strong>Detail</strong>, selesaikan Surat Tugas, lalu scan seluruh kunci sebelum work order diajukan. Pencetakan Surat Tugas dan Serah Terima Kunci dilakukan setelah approval.
         </div>
       ) : null}
 
@@ -770,6 +1280,12 @@ export default function ReplenishPage() {
                 const canSubmit = canManageOwnDraft && ["DRAFT", "DITOLAK"].includes(item.status) && (isOwner || isSuperAdmin)
                 const canReview = canUpdate && item.status === "MENUNGGU_PERSETUJUAN_TIM" && canApprove && !isOwner
                 const canCancel = canManageOwnDraft && REPLENISH_MAKER_CANCELLABLE_STATUSES.includes(item.status) && (isOwner || isSuperAdmin)
+                const canPrintKeyHandoverFromList = Boolean(
+                  typeof item.can_print_key_handover === "boolean"
+                    ? item.can_print_key_handover
+                    : (isOwner || canPrintKeyHandoverByAccess)
+                )
+                const keyHandoverPrintReady = isApprovedWorkOrderStatus(item.status)
                 const busy = actionLoadingId === item.id
 
                 return (
@@ -804,8 +1320,23 @@ export default function ReplenishPage() {
                     <td>
                       <div className="replenish-row-actions">
                         <button type="button" onClick={() => openDetail(item.id)} disabled={busy}>Detail</button>
+                        {canOpenAssignmentLetter(item.status) ? (
+                          <Link href={`/transactions/replenish/${item.id}/surat-tugas`} className="replenish-row-link">Surat Tugas</Link>
+                        ) : null}
+                        {canPrintKeyHandoverFromList ? (
+                          <button
+                            type="button"
+                            onClick={() => void printKeyHandoverDocument(item.id)}
+                            disabled={busy || keyPrintBusy || !keyHandoverPrintReady}
+                            title={keyHandoverPrintReady
+                              ? "Cetak Serah Terima Kunci"
+                              : "Cetak Serah Terima Kunci tersedia setelah Work Order disetujui"}
+                          >
+                            Cetak Serah Terima Kunci
+                          </button>
+                        ) : null}
                         {canEdit ? <button type="button" onClick={() => openEditModal(item.id)} disabled={busy}>Ubah</button> : null}
-                        {canSubmit ? <button type="button" onClick={() => handleAction(item, "SUBMIT")} disabled={busy}>Ajukan</button> : null}
+                        {canSubmit ? <button type="button" onClick={() => openDetail(item.id)} disabled={busy}>Ajukan</button> : null}
                         {canReview ? <button type="button" className="approve" onClick={() => handleAction(item, "APPROVE")} disabled={busy}>Setujui</button> : null}
                         {canReview ? <button type="button" className="reject" onClick={() => handleAction(item, "REJECT")} disabled={busy}>Tolak</button> : null}
                         {canApprove && item.status === "DRAFT" && !isOwner ? (
@@ -845,8 +1376,14 @@ export default function ReplenishPage() {
               <button type="button" onClick={closeModal} disabled={saving}>×</button>
             </header>
 
-            <form onSubmit={handleSave}>
-              {modalError ? <div className="replenish-alert error">{modalError}</div> : null}
+            <form
+              noValidate
+              onSubmit={(event) => {
+                event.preventDefault()
+                void handleSave("DRAFT")
+              }}
+            >
+              {modalError ? <div className="replenish-alert error replenish-form-error" role="alert">{modalError}</div> : null}
 
               <div className="replenish-form-section">
                 <h4>1. Jadwal dan Unit Kerja</h4>
@@ -860,12 +1397,6 @@ export default function ReplenishPage() {
                       placeholder="Cari unit kerja"
                       disabled={!isSuperAdmin}
                     />
-                  </label>
-                  <label>
-                    <span>Jenis aktivitas *</span>
-                    <select value={form.activity_type} onChange={(event) => setForm((current) => ({ ...current, activity_type: event.target.value }))}>
-                      {ACTIVITY_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-                    </select>
                   </label>
                   <label>
                     <span>Prioritas *</span>
@@ -928,9 +1459,9 @@ export default function ReplenishPage() {
                 <div className="replenish-add-machine">
                   <ReplenishAutocomplete
                     source="machine"
-                    selected={machineCandidate}
+                    selected={null}
+                    clearOnSelect
                     onSelect={(option) => {
-                      setMachineCandidate(option)
                       if (option) addMachine(option)
                     }}
                     ukerId={selectedUkerId}
@@ -949,13 +1480,67 @@ export default function ReplenishPage() {
                         <strong>{point.machine.label}</strong>
                         <div className="replenish-point-inputs">
                           <label>
-                            <span>Nominal kebutuhan</span>
-                            <input value={point.requested_amount} onChange={(event) => updatePoint(index, "requested_amount", event.target.value)} placeholder="Contoh 500000000" inputMode="decimal" />
+                            <span>Jenis aktivitas *</span>
+                            <select
+                              required
+                              value={point.activity_type}
+                              onChange={(event) => updatePoint(index, "activity_type", event.target.value)}
+                            >
+                              {ACTIVITY_OPTIONS.map((item) => (
+                                <option key={item.value} value={item.value}>{item.label}</option>
+                              ))}
+                            </select>
                           </label>
-                          <label>
-                            <span>Catatan point</span>
-                            <input value={point.notes} onChange={(event) => updatePoint(index, "notes", event.target.value)} placeholder="Catatan khusus lokasi" />
-                          </label>
+                          {point.activity_type === "PENGOSONGAN" ? (
+                            <label className="full">
+                              <span>Keterangan</span>
+                              <input
+                                value={point.notes}
+                                onChange={(event) => updatePoint(index, "notes", event.target.value)}
+                                placeholder="Keterangan pengosongan ATM/CRM"
+                              />
+                            </label>
+                          ) : (
+                            <>
+                              <label>
+                                <span>Pagu / jumlah lembar *</span>
+                                <select
+                                  required
+                                  value={point.pagu}
+                                  onChange={(event) => updatePoint(index, "pagu", event.target.value)}
+                                >
+                                  <option value="">Pilih pagu</option>
+                                  {REPLENISH_PAGU_OPTIONS.map((pagu) => (
+                                    <option key={pagu} value={pagu}>{pagu.toLocaleString("id-ID")}</option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label>
+                                <span>Nominal kebutuhan</span>
+                                <input
+                                  readOnly
+                                  value={point.requested_amount ? formatCurrency(point.requested_amount) : ""}
+                                  placeholder="Otomatis: pagu × denom"
+                                />
+                              </label>
+                              <label>
+                                <span>Kebutuhan kaset</span>
+                                <input
+                                  readOnly
+                                  value={point.cassette_count ? `${point.cassette_count} kaset` : ""}
+                                  placeholder="Otomatis: pagu ÷ 2.000"
+                                />
+                              </label>
+                              <label>
+                                <span>Keterangan</span>
+                                <input
+                                  value={point.notes}
+                                  onChange={(event) => updatePoint(index, "notes", event.target.value)}
+                                  placeholder="Keterangan khusus lokasi"
+                                />
+                              </label>
+                            </>
+                          )}
                         </div>
                       </div>
                       <button type="button" className="replenish-remove-point" onClick={() => removePoint(index)}>Hapus</button>
@@ -980,14 +1565,15 @@ export default function ReplenishPage() {
 
               <footer>
                 <button type="button" className="replenish-button secondary" onClick={closeModal} disabled={saving}>Batal</button>
-                <button type="submit" value="DRAFT" className="replenish-button secondary" disabled={saving}>
+                <button
+                  type="button"
+                  value="DRAFT"
+                  className="replenish-button secondary"
+                  disabled={saving}
+                  onClick={() => void handleSave("DRAFT")}
+                >
                   {saving ? "Menyimpan..." : editingId ? "Simpan Perubahan" : "Simpan Draft"}
                 </button>
-                {(editingId ? canUpdate : canCreate) ? (
-                  <button type="submit" value="SUBMIT" className="replenish-button primary" disabled={saving}>
-                    {saving ? "Memproses..." : "Simpan & Ajukan"}
-                  </button>
-                ) : null}
               </footer>
             </form>
           </section>
@@ -1002,10 +1588,10 @@ export default function ReplenishPage() {
                 <p className="eyebrow">Detail Work Order</p>
                 <h3>{detail?.work_order_no || "Memuat..."}</h3>
               </div>
-              <button type="button" onClick={() => setDetailOpen(false)}>×</button>
+              <button type="button" onClick={closeDetail}>×</button>
             </header>
 
-            <div className="replenish-detail-body">
+            <div className="replenish-detail-body" ref={detailBodyRef}>
               {detailLoading ? <p className="replenish-empty-card">Memuat detail...</p> : detail ? (
                 <>
                   <div className="replenish-detail-grid">
@@ -1020,7 +1606,7 @@ export default function ReplenishPage() {
                   {detail.rejection_reason ? <div className="replenish-alert error"><strong>Alasan penolakan:</strong> {detail.rejection_reason}</div> : null}
                   {canApprove && detail.status === "DRAFT" && !detailIsOwner ? (
                     <div className="replenish-alert warning">
-                      Work order ini masih Draft. Tombol Setujui dan Tolak akan aktif setelah Admin CRO mengajukannya.
+                      Work order ini masih Draft. Admin CRO harus menyelesaikan Surat Tugas dan scan seluruh kunci, lalu mengajukannya. Tombol Setujui dan Tolak akan aktif setelah Admin CRO mengajukannya.
                     </div>
                   ) : null}
                   {detailIsOwner && detail.status === "MENUNGGU_PERSETUJUAN_TIM" ? (
@@ -1054,10 +1640,284 @@ export default function ReplenishPage() {
                       {(detail.points || []).map((point) => (
                         <article key={point.id}>
                           <span>{point.sequence_no}</span>
-                          <div><strong>{point.tid || point.sn} · {point.lokasi}</strong><small>{point.kategori_mesin} · {formatCurrency(point.requested_amount)}</small></div>
+                          <div>
+                            <strong>{point.tid || point.sn} · {point.lokasi}</strong>
+                            <small>
+                              {activityLabel(point.activity_type || detail.activity_type)}
+                              {(point.activity_type || detail.activity_type) !== "PENGOSONGAN" ? (
+                                <>
+                                  {point.pagu ? ` · Pagu ${Number(point.pagu).toLocaleString("id-ID")} lembar` : " · Pagu data lama"}
+                                  {point.denomination_value ? ` · Denom ${Number(point.denomination_value).toLocaleString("id-ID")}` : point.denom ? ` · Denom ${point.denom}` : ""}
+                                  {point.required_cassettes ? ` · ${point.required_cassettes} kaset` : ""}
+                                  {point.requested_amount !== null && point.requested_amount !== undefined
+                                    ? ` · ${formatCurrency(point.requested_amount)}`
+                                    : ""}
+                                </>
+                              ) : null}
+                            </small>
+                            {point.notes ? <small>Keterangan: {point.notes}</small> : null}
+                          </div>
                         </article>
                       ))}
                     </div>
+                  </div>
+
+                  <div className="replenish-detail-section replenish-document-gate-section">
+                    <div className="replenish-section-heading">
+                      <div>
+                        <h4>Kelengkapan Pengajuan</h4>
+                        <p>Urutan Admin CRO: selesaikan Surat Tugas, scan seluruh kunci, lalu Ajukan. Surat Tugas dan Serah Terima Kunci baru dicetak setelah Work Order disetujui.</p>
+                      </div>
+                    </div>
+                    <div className="replenish-document-gate-grid">
+                      <article className={assignmentPrintStatus?.letter_ready || assignmentPrintStatus?.approved ? "success" : ""}>
+                        <span>Surat Tugas</span>
+                        <strong>
+                          {assignmentPrintLoading
+                            ? "Memeriksa..."
+                            : assignmentPrintStatus?.approved
+                              ? "Disetujui · Siap Dicetak"
+                              : assignmentPrintStatus?.letter_ready
+                                ? "Selesai Disiapkan"
+                                : "Belum Diselesaikan"}
+                        </strong>
+                        <small>
+                          {assignmentPrintStatus?.approved
+                            ? (assignmentPrintStatus?.printed
+                              ? `Sudah dicetak ${formatDateTime(assignmentPrintStatus.printed_at)}${assignmentPrintStatus.printed_by_name ? ` · ${assignmentPrintStatus.printed_by_name}` : ""}`
+                              : "Approval selesai. Admin CRO dapat mencetak Surat Tugas.")
+                            : assignmentPrintStatus?.letter_ready
+                              ? "Persiapan Surat Tugas valid. Lanjutkan scan kunci."
+                              : "Buka Surat Tugas untuk menyelesaikan dokumen persiapan."}
+                        </small>
+                      </article>
+                      <article className={keyHandover?.summary?.all_scanned ? "success" : ""}>
+                        <span>Scan Kunci</span>
+                        <strong>{keyHandover?.summary?.scanned_keys || 0} / {keyHandover?.summary?.total_keys || 0} Terverifikasi</strong>
+                        <small>
+                          {keyHandover?.summary?.all_scanned
+                            ? "Semua kunci sudah OUT dan siap menjadi syarat pengajuan."
+                            : "Scan seluruh kunci sesuai ATM/CRM pada Work Order."}
+                        </small>
+                      </article>
+                    </div>
+                    {isApprovedWorkOrderStatus(detail.status) ? (
+                      <div className="replenish-document-gate-grid">
+                        <article className={assignmentPrintStatus?.printed ? "success" : ""}>
+                          <span>Cetak Surat Tugas</span>
+                          <strong>{assignmentPrintStatus?.printed ? "Sudah Dicetak" : "Belum Dicetak"}</strong>
+                          <small>{assignmentPrintStatus?.printed_at ? formatDateTime(assignmentPrintStatus.printed_at) : "Cetak oleh Admin CRO setelah approval."}</small>
+                        </article>
+                        <article className={keyHandover?.summary?.printed ? "success" : ""}>
+                          <span>Cetak Serah Terima Kunci</span>
+                          <strong>{keyHandover?.summary?.printed ? "Sudah Dicetak" : "Belum Dicetak"}</strong>
+                          <small>{keyHandover?.printed_at ? formatDateTime(keyHandover.printed_at) : "Setelah approval, masing-masing pihak memperoleh QR pada blok penyerah dan penerima."}</small>
+                        </article>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="replenish-detail-section replenish-key-handover-section">
+                    <div className="replenish-section-heading">
+                      <div>
+                        <h4>Pengecekan &amp; Serah Terima Kunci</h4>
+                        <p>Admin CRO melakukan scan barcode kunci Replenish setelah Surat Tugas selesai disiapkan. Setelah Work Order disetujui, PDF Serah Terima Kunci menampilkan QR terpisah pada blok penyerah dan penerima, lengkap dengan nama, jabatan, dan NIP.</p>
+                      </div>
+                      {keyHandover?.verified_at ? (
+                        <span className="replenish-key-verified-badge">Terverifikasi</span>
+                      ) : null}
+                    </div>
+
+                    {keyHandoverLoading ? (
+                      <p className="replenish-empty-card">Memuat status kunci...</p>
+                    ) : keyHandover ? (
+                      <>
+                        <div className="replenish-key-summary">
+                          <article>
+                            <span>Kunci Work Order</span>
+                            <strong>{keyHandover.summary?.total_keys || 0}</strong>
+                          </article>
+                          <article>
+                            <span>Mapping Kunci</span>
+                            <strong>{keyHandover.summary?.mapped_keys || 0}</strong>
+                          </article>
+                          <article className={keyHandover.summary?.all_scanned ? "success" : ""}>
+                            <span>Sudah Discan</span>
+                            <strong>{keyHandover.summary?.scanned_keys || 0} / {keyHandover.summary?.total_keys || 0}</strong>
+                          </article>
+                          <article className={keyHandover.summary?.printed ? "success" : ""}>
+                            <span>Dokumen</span>
+                            <strong>{keyHandover.summary?.printed ? "Sudah Dicetak" : "Belum Dicetak"}</strong>
+                          </article>
+                        </div>
+
+                        {keyHandover.summary?.missing_mapping > 0 ? (
+                          <div className="replenish-alert error">
+                            {keyHandover.summary.missing_mapping} ATM/CRM belum memiliki mapping kunci Replenish. Lengkapi mapping pada Master Kunci Mesin.
+                          </div>
+                        ) : null}
+                        {keyHandover.summary?.unavailable_keys > 0 ? (
+                          <div className="replenish-alert error">
+                            {keyHandover.summary.unavailable_keys} kunci sedang tidak tersedia karena dipakai pada transaksi lain.
+                          </div>
+                        ) : null}
+                        {keyHandover.summary?.can_submit ? (
+                          <div className="replenish-alert success">
+                            Seluruh kunci sudah terverifikasi dan berstatus OUT. Jika Surat Tugas sudah selesai disiapkan, Admin CRO dapat mengajukan Work Order ke Manager Operasional / Asisten Manager CRO.
+                          </div>
+                        ) : null}
+
+                        {canManageDetailKeys ? (
+                          <div className="replenish-key-scan-panel">
+                            <label htmlFor="replenish-key-barcode">
+                              <span>Barcode Kunci</span>
+                              <div className="replenish-key-scan-row">
+                                <input
+                                  id="replenish-key-barcode"
+                                  ref={keyScanInputRef}
+                                  value={keyScanBarcode}
+                                  onChange={(event) => scheduleKeyScan(event.target.value)}
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") event.preventDefault()
+                                  }}
+                                  autoComplete="off"
+                                  spellCheck="false"
+                                  placeholder="Scan barcode kunci — verifikasi otomatis"
+                                  disabled={keyScanBusy || keyPrintBusy || !assignmentPrintStatus?.letter_ready}
+                                />
+                                <button
+                                  type="button"
+                                  className="replenish-button primary"
+                                  onClick={() => void handleKeyScan()}
+                                  disabled={keyScanBusy || keyPrintBusy || !assignmentPrintStatus?.letter_ready || !keyScanBarcode.trim()}
+                                >
+                                  {keyScanBusy ? "Memverifikasi..." : "Scan Kunci"}
+                                </button>
+                              </div>
+                              <small>
+                                {assignmentPrintStatus?.letter_ready
+                                  ? "Barcode akan diverifikasi otomatis setelah scanner selesai membaca. Tidak perlu menekan Enter."
+                                  : "Selesaikan Surat Tugas terlebih dahulu. Scanner akan aktif setelah dokumen persiapan valid."}
+                              </small>
+                              {keyHandoverError ? (
+                                <div className="replenish-alert error replenish-key-scan-message" role="alert">
+                                  {keyHandoverError}
+                                </div>
+                              ) : null}
+                            </label>
+                            <div className="replenish-key-scan-actions">
+                              <button
+                                type="button"
+                                className="replenish-button secondary"
+                                onClick={() => void resetKeyHandoverScan()}
+                                disabled={keyScanBusy || keyPrintBusy || !(keyHandover.summary?.scanned_keys > 0)}
+                              >
+                                Reset Scan
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {canPrintApprovedKeyHandover ? (
+                          <div className="replenish-key-scan-actions">
+                            <button
+                              type="button"
+                              className="replenish-button secondary"
+                              onClick={() => void printKeyHandoverDocument(detail.id)}
+                              disabled={keyPrintBusy || !keyHandoverDetailPrintReady}
+                              title={isApprovedWorkOrderStatus(detail.status)
+                                ? "Cetak dokumen Serah Terima Kunci"
+                                : "Cetak tersedia setelah Work Order disetujui"}
+                            >
+                              {keyPrintBusy
+                                ? "Menyiapkan PDF..."
+                                : keyHandover.summary?.printed
+                                  ? "Buka Ulang PDF Serah Terima Kunci"
+                                  : "Bentuk PDF & Cetak Serah Terima Kunci"}
+                            </button>
+                            {!keyHandover.summary?.printed && Number(keyHandoverPdf?.work_order_id) === Number(detail.id) ? (
+                              <button
+                                type="button"
+                                className="replenish-button primary"
+                                onClick={() => void confirmKeyHandoverPrinted(detail.id)}
+                                disabled={keyPrintBusy}
+                              >
+                                Konfirmasi Sudah Dicetak
+                              </button>
+                            ) : null}
+                          </div>
+                        ) : null}
+
+                        {keyHandoverPdfVisible &&
+                        Number(keyHandoverPdf?.work_order_id) === Number(detail.id) &&
+                        keyHandoverPdf?.pdf_url ? (
+                          <section
+                            ref={keyHandoverPdfViewerRef}
+                            className="replenish-key-pdf-panel"
+                            aria-label="Pratinjau PDF Serah Terima Kunci"
+                          >
+                            <header className="replenish-key-pdf-panel__header">
+                              <div>
+                                <span>PDF Serah Terima Kunci</span>
+                                <strong>{keyHandoverPdf.file_name || `work-order-${detail.id}.pdf`}</strong>
+                                <small>Cetak menggunakan ikon printer pada toolbar PDF di bawah.</small>
+                              </div>
+                              <button
+                                type="button"
+                                className="replenish-button secondary"
+                                onClick={() => setKeyHandoverPdfVisible(false)}
+                                disabled={keyPrintBusy}
+                              >
+                                Tutup Pratinjau
+                              </button>
+                            </header>
+                            <iframe
+                              key={keyHandoverPdf.pdf_hash}
+                              src={`${keyHandoverPdf.pdf_url}#toolbar=1&navpanes=0&view=FitH`}
+                              className="replenish-key-pdf-viewer"
+                              title={`PDF Serah Terima Kunci ${detail.work_order_no || detail.id}`}
+                            />
+                          </section>
+                        ) : null}
+
+                        <div className="replenish-key-list">
+                          {(keyHandover.items || []).map((item) => {
+                            const unavailable = item.mapping_status !== "IN" && Number(item.current_work_order_id) !== Number(detail.id)
+                            const statusLabel = !item.machine_key_mapping_id
+                              ? "Mapping belum ada"
+                              : unavailable
+                                ? "Tidak tersedia"
+                                : item.scanned
+                                  ? "Sudah Discan"
+                                  : "Menunggu Scan"
+                            const statusClassName = item.scanned
+                              ? "success"
+                              : (!item.machine_key_mapping_id || unavailable)
+                                ? "danger"
+                                : "neutral"
+
+                            return (
+                              <article key={item.work_order_point_id} className={item.scanned ? "verified" : ""}>
+                                <span className="replenish-key-sequence">{item.sequence_no}</span>
+                                <div className="replenish-key-item-main">
+                                  <strong>{item.tid || item.sn || `Mesin ${item.machine_id}`} · {item.lokasi || "-"}</strong>
+                                  <small>
+                                    SN {item.sn || "-"} · Matrix {item.position || "-"}
+                                    {item.scanned_at ? ` · Scan ${formatDateTime(item.scanned_at)}` : ""}
+                                  </small>
+                                  {item.scanned && item.barcode_snapshot ? <code>{item.barcode_snapshot}</code> : null}
+                                </div>
+                                <span className={`replenish-key-state ${statusClassName}`}>{statusLabel}</span>
+                              </article>
+                            )
+                          })}
+                        </div>
+                      </>
+                    ) : keyHandoverError ? (
+                      <div className="replenish-alert error" role="alert">{keyHandoverError}</div>
+                    ) : (
+                      <p className="replenish-empty-card">Status kunci belum tersedia.</p>
+                    )}
                   </div>
 
                   <div className="replenish-detail-section">
@@ -1076,12 +1936,48 @@ export default function ReplenishPage() {
             </div>
             {detail ? (
               <footer className="replenish-detail-actions">
-                <button type="button" className="replenish-button secondary" onClick={() => setDetailOpen(false)} disabled={actionLoadingId === detail.id}>Tutup</button>
-                {canCancelDetail ? (
-                  <button type="button" className="replenish-button reject" onClick={() => handleAction(detail, "CANCEL")} disabled={actionLoadingId === detail.id}>Batalkan</button>
+                <button type="button" className="replenish-button secondary" onClick={closeDetail} disabled={actionLoadingId === detail.id || keyScanBusy || keyPrintBusy}>Tutup</button>
+                {canOpenAssignmentLetter(detail.status) ? (
+                  <Link href={`/transactions/replenish/${detail.id}/surat-tugas`} target="_blank" rel="noreferrer" className="replenish-button secondary">
+                    {canManageDetailKeys
+                      ? (assignmentPrintStatus?.letter_ready ? "Tinjau Surat Tugas" : "Selesaikan Surat Tugas")
+                      : canPrintApprovedDocuments
+                        ? (assignmentPrintStatus?.printed ? "Cetak Ulang Surat Tugas" : "Cetak Surat Tugas")
+                        : "Lihat Surat Tugas"}
+                  </Link>
                 ) : null}
-                {canSubmitDetail ? (
-                  <button type="button" className="replenish-button primary" onClick={() => handleAction(detail, "SUBMIT")} disabled={actionLoadingId === detail.id}>Ajukan</button>
+                {canPrintApprovedKeyHandover ? (
+                  <button
+                    type="button"
+                    className="replenish-button secondary"
+                    onClick={() => void printKeyHandoverDocument(detail.id)}
+                    disabled={keyPrintBusy || !keyHandoverDetailPrintReady}
+                    title={!isApprovedWorkOrderStatus(detail.status)
+                      ? "Cetak Serah Terima Kunci tersedia setelah Work Order disetujui"
+                      : "Cetak dokumen Serah Terima Kunci"}
+                  >
+                    {keyPrintBusy
+                      ? "Menyiapkan PDF..."
+                      : keyHandover?.summary?.printed
+                        ? "Buka Ulang PDF Serah Terima Kunci"
+                        : "Bentuk PDF & Cetak Serah Terima Kunci"}
+                  </button>
+                ) : null}
+                {canCancelDetail ? (
+                  <button type="button" className="replenish-button reject" onClick={() => handleAction(detail, "CANCEL")} disabled={actionLoadingId === detail.id || keyScanBusy || keyPrintBusy}>Batalkan</button>
+                ) : null}
+                {canManageDetailKeys ? (
+                  <button
+                    type="button"
+                    className="replenish-button primary"
+                    onClick={() => handleAction(detail, "SUBMIT")}
+                    disabled={actionLoadingId === detail.id || keyScanBusy || keyPrintBusy || keyHandoverLoading || assignmentPrintLoading || !canSubmitDetail}
+                    title={canSubmitDetail
+                      ? "Ajukan Work Order ke Manager Operasional / Asisten Manager CRO"
+                      : "Selesaikan Surat Tugas dan scan seluruh kunci terlebih dahulu"}
+                  >
+                    Ajukan ke Manager
+                  </button>
                 ) : null}
                 {canReviewDetail ? (
                   <>

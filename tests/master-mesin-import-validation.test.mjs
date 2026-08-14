@@ -11,6 +11,7 @@ function createValidRow(overrides = {}) {
     tid: "TID0001",
     sn: "SN0001",
     db: "DB01",
+    denom: "50.000 / 100.000",
     kode_cabang: "BR001",
     kode_project: "PRJ001",
     kode_merk: "NCR",
@@ -38,8 +39,36 @@ test("normalizes a valid machine import row", () => {
   assert.equal(result.errors.length, 0)
   assert.equal(result.rows[0].tid, "TID0001")
   assert.equal(result.rows[0].sn, "SN0001")
+  assert.equal(result.rows[0].denom, "50.000 / 100.000")
   assert.equal(result.rows[0].longitude, 106.816666)
   assert.equal(result.rows[0].status, "AKTIF")
+})
+
+test("requires and normalizes denom in machine uploads", () => {
+  const normalized = validateMachineImportRows([
+    createValidRow({ denom: "  50.000 / 100.000  " }),
+  ])
+  assert.equal(normalized.errors.length, 0)
+  assert.equal(normalized.rows[0].denom, "50.000 / 100.000")
+
+  const missing = validateMachineImportRows([createValidRow({ denom: "" })])
+  assert.ok(
+    missing.errors.some(
+      (error) => error.field === "denom" && /wajib diisi/.test(error.message)
+    )
+  )
+})
+
+test("rejects denom longer than 50 characters during upload", () => {
+  const result = validateMachineImportRows([
+    createValidRow({ denom: "1".repeat(51) }),
+  ])
+
+  assert.ok(
+    result.errors.some(
+      (error) => error.field === "denom" && /maksimal 50 karakter/.test(error.message)
+    )
+  )
 })
 
 test("rejects duplicate TID and duplicate SN inside one upload", () => {
@@ -100,7 +129,6 @@ test("returns the invalid location category value and a correction suggestion", 
   assert.match(categoryError.message, /RUMAH SAKITT/)
   assert.match(categoryError.message, /RUMAH SAKIT/)
 })
-
 
 test("accepts PERTOKOAN as a location category", () => {
   const result = validateMachineImportRows([

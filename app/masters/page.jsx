@@ -35,6 +35,12 @@ const masterMenus = [
     href: "/masters/mesin",
   },
   {
+    title: "Master Kunci Mesin",
+    description:
+      "Registrasi set kunci, posisi matrix penyimpanan, dan barcode slink kunci.",
+    href: "/masters/kunci-mesin",
+  },
+  {
     title: "Master Pegawai",
     description: "Kelola data pegawai pada unit kerja atau cabang.",
     href: "/masters/pegawai",

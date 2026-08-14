@@ -1,0 +1,290 @@
+/*
+ * Style mandiri untuk /spare_kaset. Seluruh selector dibatasi pada halaman ini
+ * agar form tetap rapi walaupun globals.css pada instalasi lama belum memuat
+ * penambahan modul CPC terbaru.
+ */
+.spare-cassette-page {
+  display: grid;
+  gap: 20px;
+}
+
+.spare-cassette-page .replenish-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+}
+
+.spare-cassette-page .replenish-heading h2 {
+  margin-bottom: 8px;
+}
+
+.spare-cassette-page .replenish-heading p:last-child {
+  max-width: 860px;
+}
+
+.spare-cassette-page .replenish-heading-actions {
+  display: flex;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.spare-cassette-page .replenish-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.spare-cassette-page .replenish-summary-grid article {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, .9);
+  box-shadow: 0 14px 38px rgba(7, 26, 61, .06);
+}
+
+.spare-cassette-page .replenish-summary-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.spare-cassette-page .replenish-summary-grid strong {
+  display: block;
+  margin-top: 7px;
+  overflow-wrap: anywhere;
+  font-size: clamp(18px, 2vw, 26px);
+  letter-spacing: -.04em;
+}
+
+.spare-cassette-page .cpc-spare-panel {
+  overflow: hidden;
+}
+
+.spare-cassette-page .cpc-spare-panel-header {
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.spare-cassette-page .cpc-spare-panel-header p:last-child {
+  max-width: 760px;
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.spare-cassette-page .cpc-spare-rule {
+  margin: 0 18px 14px;
+}
+
+.spare-cassette-page .cpc-spare-create-form {
+  margin: 0 18px 16px;
+  border: 1px solid #cfdbed;
+  border-radius: 14px;
+  padding: 14px;
+  background: #f8fbff;
+}
+
+.spare-cassette-page .cpc-spare-create-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.spare-cassette-page .cpc-spare-create-heading strong,
+.spare-cassette-page .cpc-spare-create-heading small {
+  display: block;
+}
+
+.spare-cassette-page .cpc-spare-create-heading strong {
+  font-size: 13px;
+}
+
+.spare-cassette-page .cpc-spare-create-heading small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.spare-cassette-page .cpc-spare-create-heading > span {
+  border-radius: 999px;
+  padding: 6px 9px;
+  color: var(--blue-800);
+  background: var(--blue-100);
+  font-size: 9px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.spare-cassette-page .cpc-spare-create-grid {
+  display: grid;
+  grid-template-columns: minmax(190px, 1.1fr) minmax(150px, .8fr) minmax(130px, .7fr) minmax(210px, 1.2fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.spare-cassette-page .cpc-spare-create-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.spare-cassette-page .cpc-spare-create-grid label > span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.spare-cassette-page .cpc-spare-create-grid input,
+.spare-cassette-page .cpc-spare-create-grid select {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid #d7e1ee;
+  border-radius: 9px;
+  padding: 8px 10px;
+  color: var(--ink);
+  background: #fff;
+  outline: none;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.spare-cassette-page .cpc-spare-create-grid input:focus,
+.spare-cassette-page .cpc-spare-create-grid select:focus {
+  border-color: var(--blue-600);
+  box-shadow: 0 0 0 3px rgba(11, 99, 206, .1);
+}
+
+.spare-cassette-page .cpc-spare-create-grid input[readonly] {
+  color: #526177;
+  background: #eef3f8;
+}
+
+.spare-cassette-page .cpc-spare-table-wrap {
+  margin: 0 18px 18px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.spare-cassette-page .cpc-spare-table {
+  width: 100%;
+  min-width: 1120px;
+  border-collapse: collapse;
+}
+
+.spare-cassette-page .cpc-spare-table td {
+  vertical-align: middle;
+}
+
+.spare-cassette-page .cpc-spare-table td > strong,
+.spare-cassette-page .cpc-spare-table td > small {
+  display: block;
+}
+
+.spare-cassette-page .cpc-spare-table td > small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.spare-cassette-page .cpc-spare-state {
+  display: inline-flex;
+  align-items: center;
+  min-height: 27px;
+  border-radius: 999px;
+  padding: 5px 9px;
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.spare-cassette-page .cpc-spare-state.ready {
+  color: #08764f;
+  background: var(--green-100);
+}
+
+.spare-cassette-page .cpc-spare-state.allocated {
+  color: #75430b;
+  background: #ffead1;
+}
+
+.spare-cassette-page .cpc-spare-state.kosong {
+  color: #526177;
+  background: #edf1f6;
+}
+
+.spare-cassette-page .cpc-spare-prepare-form {
+  display: grid;
+  grid-template-columns: minmax(135px, .7fr) minmax(185px, 1fr) auto;
+  gap: 7px;
+}
+
+.spare-cassette-page .cpc-spare-prepare-form input,
+.spare-cassette-page .cpc-spare-prepare-form select {
+  min-height: 36px;
+  border: 1px solid #dfe6f1;
+  border-radius: 9px;
+  padding: 7px 9px;
+  color: var(--ink);
+  background: #fff;
+  outline: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.spare-cassette-page .cpc-spare-prepare-form input:focus,
+.spare-cassette-page .cpc-spare-prepare-form select:focus {
+  border-color: var(--blue-600);
+  box-shadow: 0 0 0 3px rgba(11, 99, 206, .1);
+}
+
+.spare-cassette-page .cpc-spare-prepare-form input:disabled,
+.spare-cassette-page .cpc-spare-prepare-form select:disabled {
+  background: #eef2f6;
+}
+
+.spare-cassette-page .cpc-seal-code {
+  display: inline-block;
+  padding: 5px 7px;
+  border-radius: 7px;
+  color: #243247;
+  background: #f2f4f7;
+  font: 700 11px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (max-width: 1180px) {
+  .spare-cassette-page .cpc-spare-create-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .spare-cassette-page .replenish-summary-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 820px) {
+  .spare-cassette-page .replenish-heading,
+  .spare-cassette-page .cpc-spare-panel-header,
+  .spare-cassette-page .cpc-spare-create-heading {
+    flex-direction: column;
+  }
+
+  .spare-cassette-page .replenish-summary-grid,
+  .spare-cassette-page .cpc-spare-create-grid,
+  .spare-cassette-page .cpc-spare-prepare-form {
+    grid-template-columns: 1fr;
+  }
+
+  .spare-cassette-page .replenish-heading-actions {
+    width: 100%;
+  }
+
+  .spare-cassette-page .replenish-heading-actions .replenish-button {
+    width: 100%;
+  }
+}

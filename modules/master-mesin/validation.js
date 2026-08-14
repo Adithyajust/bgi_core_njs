@@ -65,6 +65,7 @@ export function validateMachinePayload(body) {
   const tid = normalizeUpperText(body?.tid)
   const sn = normalizeUpperText(body?.sn)
   const dbValue = normalizeNullableText(body?.db)
+  const denom = normalizeUpperText(body?.denom)
   const cabangId = normalizeId(body?.cabang_id)
   const projectId = normalizeId(body?.project_id)
   const lokasi = normalizeText(body?.lokasi)
@@ -98,6 +99,8 @@ export function validateMachinePayload(body) {
     [sn.length > 100, "SN maksimal 100 karakter."],
     [tid && sn && tid === sn, "TID dan SN tidak boleh memiliki nilai yang sama."],
     [dbValue && dbValue.length > 100, "DB maksimal 100 karakter."],
+    [!denom, "Denom wajib diisi."],
+    [denom.length > 50, "Denom maksimal 50 karakter."],
     [!cabangId, "Cabang pengelola wajib dipilih."],
     [!projectId, "Project wajib dipilih."],
     [!lokasi, "Lokasi fisik mesin wajib diisi."],
@@ -139,6 +142,7 @@ export function validateMachinePayload(body) {
       tid,
       sn,
       dbValue,
+      denom,
       cabangId,
       projectId,
       lokasi,

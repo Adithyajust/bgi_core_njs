@@ -1,3 +1,4 @@
+import { readJsonBody } from "@/lib/http/json-body"
 import bcrypt from "bcryptjs"
 import { NextResponse } from "next/server"
 import { connectDB, sql } from "@/lib/mssql"
@@ -18,6 +19,7 @@ export const runtime = "nodejs"
 
 const MAX_LOGIN_ATTEMPTS = 5
 const LOCK_DURATION_MINUTES = 15
+const DUMMY_PASSWORD_HASH = "$2b$12$COuwxUN1tIW.LIYeGfMFH.vbqi2qew9JcljbEPR4vETBi8wZSShOq"
 
 function normalizeUsername(value) {
   if (typeof value !== "string") {
@@ -40,7 +42,7 @@ export async function POST(request) {
     let body
 
     try {
-      body = await request.json()
+      body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     } catch {
       return NextResponse.json(
         {
@@ -190,6 +192,10 @@ export async function POST(request) {
       `)
 
     if (userResult.recordset.length === 0) {
+      // Keep the response timing close to the invalid-password path to reduce
+      // username enumeration through a bcrypt timing side channel.
+      await bcrypt.compare(password, DUMMY_PASSWORD_HASH)
+
       await writeAuditLog({
         request,
         action: "LOGIN_FAILED",

@@ -6,6 +6,7 @@ import { validateMachinePayload } from "../modules/master-mesin/validation.js"
 const validPayload = {
   tid: "tid-001",
   sn: "sn-001",
+  denom: "50.000 / 100.000",
   cabang_id: 1,
   project_id: 1,
   lokasi: "Jakarta",
@@ -27,6 +28,29 @@ test("normalizes valid machine payload", () => {
   assert.equal(result.error, null)
   assert.equal(result.data.tid, "TID-001")
   assert.equal(result.data.sn, "SN-001")
+  assert.equal(result.data.denom, "50.000 / 100.000")
+})
+
+test("requires denom in the machine form", () => {
+  const result = validateMachinePayload({ ...validPayload, denom: "" })
+
+  assert.equal(result.data, null)
+  assert.match(result.error, /Denom wajib diisi/)
+})
+
+test("normalizes denom and rejects values longer than 50 characters", () => {
+  const normalized = validateMachinePayload({
+    ...validPayload,
+    denom: "  50.000 / 100.000  ",
+  })
+  assert.equal(normalized.error, null)
+  assert.equal(normalized.data.denom, "50.000 / 100.000")
+
+  const tooLong = validateMachinePayload({
+    ...validPayload,
+    denom: "1".repeat(51),
+  })
+  assert.match(tooLong.error, /Denom maksimal 50 karakter/)
 })
 
 test("rejects incompatible operation hours", () => {
@@ -86,7 +110,6 @@ test("accepts 09:00 - 15:00 for NON 24 JAM in the machine form", () => {
   assert.equal(result.error, null)
   assert.equal(result.data.waktuOps, "09:00 - 15:00")
 })
-
 
 test("accepts all additional official location categories in machine form", () => {
   const categories = [

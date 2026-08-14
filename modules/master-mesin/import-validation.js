@@ -18,6 +18,7 @@ export const MACHINE_IMPORT_HEADERS = [
   "tid",
   "sn",
   "db",
+  "denom",
   "kode_cabang",
   "kode_project",
   "kode_merk",
@@ -39,6 +40,7 @@ export const MACHINE_IMPORT_HEADER_LABELS = {
   tid: "TID",
   sn: "SN",
   db: "DB",
+  denom: "Denom",
   kode_cabang: "Kode Cabang",
   kode_project: "Kode Project",
   kode_merk: "Kode Merk",
@@ -176,6 +178,7 @@ export function validateMachineImportRows(rows) {
       tid: normalizeUpperText(row?.tid),
       sn: normalizeUpperText(row?.sn),
       db: normalizeText(row?.db),
+      denom: normalizeUpperText(row?.denom),
       kode_cabang: normalizeUpperText(row?.kode_cabang),
       kode_project: normalizeUpperText(row?.kode_project),
       kode_merk: normalizeUpperText(row?.kode_merk),
@@ -234,6 +237,12 @@ export function validateMachineImportRows(rows) {
 
     if (normalized.db.length > 100) {
       addError(errors, rowNumber, "db", "DB maksimal 100 karakter.")
+    }
+
+    if (!normalized.denom) {
+      addError(errors, rowNumber, "denom", "Denom wajib diisi.")
+    } else if (normalized.denom.length > 50) {
+      addError(errors, rowNumber, "denom", "Denom maksimal 50 karakter.")
     }
 
     if (!normalized.kode_cabang) {

@@ -1,14 +1,26 @@
 import { NextResponse } from "next/server"
 
+import { GET as getKeyHandoverResource, POST as postKeyHandoverResource } from "./key-handover/route"
+import { GET as getKeyHandoverPdfResource } from "./key-handover/pdf/route"
+import { GET as getAssignmentLetterResource } from "./surat-tugas/route"
+import {
+  GET as getAssignmentLetterPdfResource,
+  PATCH as patchAssignmentLetterPdfResource,
+  POST as postAssignmentLetterPdfResource,
+} from "./surat-tugas/pdf/route"
+
 import { authorizeApiRequest, getUserDataScope } from "@/lib/access-control"
 import { readJsonBody, InvalidJsonBodyError, RequestBodyTooLargeError } from "@/lib/http/json-body"
+import { isRetryableSqlError } from "@/lib/database/transaction"
 import { connectDB, sql } from "@/lib/mssql"
-import { writeAuditLog } from "@/lib/security/audit-log"
+import { insertAuditLog } from "@/lib/security/audit-log"
 import {
   calculateRequestedAmount,
   getReplenishWorkOrderDetail,
   replaceWorkOrderDetails,
+  resetReplenishKeyHandover,
   resolveReplenishUker,
+  validateReplenishKeyHandoverForSubmit,
   validateReplenishReferences,
 } from "@/modules/replenish/database"
 import {
@@ -16,6 +28,13 @@ import {
   REPLENISH_MAKER_CANCELLABLE_STATUSES,
 } from "@/modules/replenish/constants"
 import { isReplenishTeamApprover } from "@/modules/replenish/authorization"
+import {
+  buildAssignmentLetterSnapshot,
+  createApprovedAssignmentLetter,
+  createPendingAssignmentLetter,
+  getAssignmentLetterByWorkOrder,
+} from "@/modules/replenish/assignment-letter"
+import { freezeApprovedKeyHandover } from "@/modules/replenish/key-handover-approval"
 import {
   normalizeRejectionReason,
   normalizeReplenishAction,
@@ -33,6 +52,13 @@ function errorResponse(message, status = 400, extra = {}) {
 
 function internalError(error, fallbackMessage) {
   console.error(fallbackMessage, error)
+  const number = Number(error?.number || error?.originalError?.info?.number || 0)
+  if (isRetryableSqlError(error) || number === 52710) {
+    return NextResponse.json(
+      { success: false, message: "Sistem sedang memproses transaksi lain. Coba kembali beberapa saat lagi." },
+      { status: 503, headers: { "Retry-After": "1" } }
+    )
+  }
   const detail = process.env.NODE_ENV === "production" ? "" : ` Detail: ${error.message}`
   return errorResponse(`${fallbackMessage}${detail}`, 500)
 }
@@ -40,6 +66,10 @@ function internalError(error, fallbackMessage) {
 function normalizeId(value) {
   const parsed = Number(value)
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null
+}
+
+function requestedResource(request) {
+  return new URL(request.url).searchParams.get("resource") || ""
 }
 
 function normalizeBinaryRowVersion(value) {
@@ -121,7 +151,58 @@ async function getLockedWorkOrder(executor, workOrderId, scopeCodeUker) {
   return result.recordset[0] || null
 }
 
+async function validateAssignmentLetterReadyForSubmit(
+  executor,
+  workOrderId,
+  scopeCodeUker
+) {
+  const letter = await getAssignmentLetterByWorkOrder(
+    executor,
+    workOrderId,
+    scopeCodeUker
+  )
+
+  if (!letter?.id || !letter.payload_valid || letter.status !== "MENUNGGU_PERSETUJUAN") {
+    return {
+      error: "Surat Tugas belum diselesaikan. Buka Surat Tugas dan pastikan data persiapan sudah valid sebelum scan kunci dan pengajuan.",
+      status: 409,
+    }
+  }
+
+  // Defense-in-depth: hash surat yang tersimpan harus identik dengan snapshot
+  // Work Order terkini. payload_valid hanya membuktikan payload surat tidak
+  // berubah terhadap hash miliknya sendiri, bukan bahwa WO belum diedit.
+  const currentSnapshot = await buildAssignmentLetterSnapshot(
+    executor,
+    workOrderId,
+    scopeCodeUker,
+    { allowPreparatory: true }
+  )
+  if (currentSnapshot.error) {
+    return { error: currentSnapshot.error, status: 409 }
+  }
+  if (String(currentSnapshot.documentHash || "") !== String(letter.document_hash || "")) {
+    return {
+      error: "Surat Tugas sudah tidak sesuai dengan Work Order terbaru. Buka kembali Surat Tugas agar snapshot diperbarui sebelum pengajuan.",
+      status: 409,
+    }
+  }
+
+  return {
+    error: null,
+    letterId: Number(letter.id),
+    letterNo: letter.letter_no,
+    documentHash: letter.document_hash,
+  }
+}
+
 export async function GET(request, context) {
+  const resource = requestedResource(request)
+  if (resource === "key-handover") return getKeyHandoverResource(request, context)
+  if (resource === "key-handover-pdf") return getKeyHandoverPdfResource(request, context)
+  if (resource === "surat-tugas") return getAssignmentLetterResource(request, context)
+  if (resource === "surat-tugas-pdf") return getAssignmentLetterPdfResource(request, context)
+
   const authorization = await authorizeTransaction(request, "view")
   if (!authorization.authorized) return authorization.response
 
@@ -146,6 +227,13 @@ export async function GET(request, context) {
   }
 }
 
+export async function POST(request, context) {
+  const resource = requestedResource(request)
+  if (resource === "key-handover") return postKeyHandoverResource(request, context)
+  if (resource === "surat-tugas-pdf") return postAssignmentLetterPdfResource(request, context)
+  return errorResponse("Resource replenish tidak ditemukan.", 404)
+}
+
 export async function PUT(request, context) {
   const authorization = await authorizeTransaction(request, "update")
   if (!authorization.authorized) return authorization.response
@@ -165,7 +253,7 @@ export async function PUT(request, context) {
   let finished = false
 
   try {
-    await transaction.begin(sql.ISOLATION_LEVEL.SERIALIZABLE)
+    await transaction.begin(sql.ISOLATION_LEVEL.READ_COMMITTED)
     const scope = getUserDataScope(authorization.user)
     const current = await getLockedWorkOrder(
       transaction,
@@ -196,7 +284,7 @@ export async function PUT(request, context) {
 
     // Proses edit tidak mempercayai representasi row_version dari browser.
     // Baris telah dikunci menggunakan UPDLOCK + HOLDLOCK dalam transaksi
-    // SERIALIZABLE, sehingga token binary aktual dari SQL Server dapat dipakai
+    // Row lock terarah memastikan token binary aktual dari SQL Server dapat dipakai
     // langsung untuk UPDATE tanpa konversi hex/Buffer di frontend.
     const lockedRowVersion = normalizeBinaryRowVersion(current.row_version)
     if (!lockedRowVersion) {
@@ -231,7 +319,11 @@ export async function PUT(request, context) {
       return errorResponse(referenceValidation.error, 409)
     }
 
-    const totalRequestedAmount = calculateRequestedAmount(validation.data.points)
+    const transactionData = {
+      ...validation.data,
+      points: referenceValidation.points,
+    }
+    const totalRequestedAmount = calculateRequestedAmount(transactionData.points)
     const updateResult = await new sql.Request(transaction)
       .input("workOrderId", sql.BigInt, workOrderId)
       .input("rowVersion", sql.Binary(8), lockedRowVersion)
@@ -282,7 +374,18 @@ export async function PUT(request, context) {
       )
     }
 
-    await replaceWorkOrderDetails(transaction, workOrderId, validation.data)
+    // Perubahan detail membatalkan hasil scan/cetak serah terima sebelumnya.
+    // Struktur tabel tetap sama; hanya state handover yang dikosongkan.
+    await resetReplenishKeyHandover(transaction, workOrderId, authorization.user.id)
+    await replaceWorkOrderDetails(transaction, workOrderId, transactionData)
+
+    // Setiap edit WO langsung membentuk ulang snapshot Surat Tugas persiapan
+    // di transaksi yang sama. Dengan demikian surat lama tidak dapat tetap
+    // terlihat valid setelah jadwal, tim, kendaraan, atau titik ATM berubah.
+    const refreshedAssignmentLetter = await createPendingAssignmentLetter(transaction, {
+      workOrderId,
+      scopeCodeUker: scope.isSuperAdmin ? null : scope.codeUker,
+    })
 
     await new sql.Request(transaction)
       .input("workOrderId", sql.BigInt, workOrderId)
@@ -295,16 +398,7 @@ export async function PUT(request, context) {
           (@workOrderId, @fromStatus, 'DRAFT', 'UPDATE', 'Draft work order diperbarui.', @actorUserId);
       `)
 
-    await transaction.commit()
-    finished = true
-
-    const updated = await getReplenishWorkOrderDetail(
-      db,
-      workOrderId,
-      scope.isSuperAdmin ? null : scope.codeUker
-    )
-
-    await writeAuditLog({
+    await insertAuditLog(transaction, {
       request,
       userId: authorization.user.id,
       action: "UPDATE",
@@ -317,8 +411,19 @@ export async function PUT(request, context) {
         total_points: validation.data.points.length,
         total_requested_amount: totalRequestedAmount,
         escort_name: validation.data.escortName,
+        assignment_letter_document_hash: refreshedAssignmentLetter.documentHash,
+        assignment_letter_refreshed: !refreshedAssignmentLetter.unchanged,
       },
     })
+
+    await transaction.commit()
+    finished = true
+
+    const updated = await getReplenishWorkOrderDetail(
+      db,
+      workOrderId,
+      scope.isSuperAdmin ? null : scope.codeUker
+    )
 
     return NextResponse.json(
       {
@@ -348,6 +453,10 @@ export async function PUT(request, context) {
 }
 
 export async function PATCH(request, context) {
+  if (requestedResource(request) === "surat-tugas-pdf") {
+    return patchAssignmentLetterPdfResource(request, context)
+  }
+
   // Pastikan pengguna memiliki akses modul sebelum membaca payload aksi.
   const viewAuthorization = await authorizeTransaction(request, "view")
   if (!viewAuthorization.authorized) return viewAuthorization.response
@@ -389,7 +498,7 @@ export async function PATCH(request, context) {
   let finished = false
 
   try {
-    await transaction.begin(sql.ISOLATION_LEVEL.SERIALIZABLE)
+    await transaction.begin(sql.ISOLATION_LEVEL.READ_COMMITTED)
     const scope = getUserDataScope(authorization.user)
     const current = await getLockedWorkOrder(
       transaction,
@@ -405,7 +514,7 @@ export async function PATCH(request, context) {
 
     // Aksi lifecycle (submit/approve/reject/cancel) tidak bergantung pada token
     // row_version dari browser. Baris sudah dikunci dengan UPDLOCK + HOLDLOCK
-    // dalam transaksi SERIALIZABLE, lalu token binary aktual dari SQL Server
+    // dalam transaksi dengan row lock terarah, lalu token binary aktual dari SQL Server
     // dipakai langsung untuk UPDATE. Ini menghindari perbedaan representasi
     // Buffer/hex/JSON tanpa menghilangkan proteksi terhadap perubahan bersamaan.
     const lockedRowVersion = normalizeBinaryRowVersion(current.row_version)
@@ -420,6 +529,19 @@ export async function PATCH(request, context) {
 
     let targetStatus
     let historyNotes
+    let approvedAt = null
+
+    if (action === REPLENISH_ACTIONS.APPROVE) {
+      const approvalClock = await new sql.Request(transaction).query(`
+        SELECT CAST(SYSDATETIME() AS DATETIME2(0)) AS approved_at;
+      `)
+      approvedAt = approvalClock.recordset[0]?.approved_at || null
+      if (!approvedAt) {
+        await transaction.rollback()
+        finished = true
+        return errorResponse("Waktu persetujuan dari database tidak tersedia.", 500)
+      }
+    }
 
     if (action === REPLENISH_ACTIONS.SUBMIT) {
       if (!["DRAFT", "DITOLAK"].includes(current.status)) {
@@ -430,10 +552,35 @@ export async function PATCH(request, context) {
       if (!scope.isSuperAdmin && current.created_by !== authorization.user.id) {
         await transaction.rollback()
         finished = true
-        return errorResponse("Hanya pembuat work order yang dapat mengajukan persetujuan.", 403)
+        return errorResponse("Hanya pembuat work order yang dapat mengajukan persetujuan. Pada alur Replenish, proses ini merupakan tugas Admin CRO.", 403)
       }
+
+      const assignmentLetterVerification = await validateAssignmentLetterReadyForSubmit(
+        transaction,
+        workOrderId,
+        scope.isSuperAdmin ? null : scope.codeUker
+      )
+      if (assignmentLetterVerification.error) {
+        await transaction.rollback()
+        finished = true
+        return errorResponse(
+          assignmentLetterVerification.error,
+          assignmentLetterVerification.status || 409
+        )
+      }
+
+      const keyVerification = await validateReplenishKeyHandoverForSubmit(
+        transaction,
+        workOrderId
+      )
+      if (keyVerification.error) {
+        await transaction.rollback()
+        finished = true
+        return errorResponse(keyVerification.error, keyVerification.status || 409)
+      }
+
       targetStatus = "MENUNGGU_PERSETUJUAN_TIM"
-      historyNotes = "Work order diajukan untuk persetujuan tim."
+      historyNotes = `Work order diajukan setelah Surat Tugas ${assignmentLetterVerification.letterNo} selesai disiapkan dan ${keyVerification.scanned} kunci berhasil diverifikasi.`
     } else if (
       action === REPLENISH_ACTIONS.APPROVE ||
       action === REPLENISH_ACTIONS.REJECT
@@ -442,7 +589,7 @@ export async function PATCH(request, context) {
         await transaction.rollback()
         finished = true
         return errorResponse(
-          "Persetujuan tim hanya dapat diproses oleh Manager Operasional, Asisten Manager CRO, Manager CRO, atau Super Admin.",
+          "Persetujuan Work Order hanya dapat diproses oleh Manager Operasional, Asisten Manager CRO, atau Super Admin.",
           403
         )
       }
@@ -490,6 +637,7 @@ export async function PATCH(request, context) {
       .input("action", sql.VarChar(30), action)
       .input("reason", sql.NVarChar(1000), reason)
       .input("actorUserId", sql.Int, authorization.user.id)
+      .input("approvedAt", sql.DateTime2(0), approvedAt)
       .query(`
         UPDATE dbo.replenish_work_orders
         SET
@@ -497,7 +645,7 @@ export async function PATCH(request, context) {
           submitted_by = CASE WHEN @action = 'SUBMIT' THEN @actorUserId ELSE submitted_by END,
           submitted_at = CASE WHEN @action = 'SUBMIT' THEN SYSDATETIME() ELSE submitted_at END,
           approved_by = CASE WHEN @action = 'APPROVE' THEN @actorUserId ELSE approved_by END,
-          approved_at = CASE WHEN @action = 'APPROVE' THEN SYSDATETIME() ELSE approved_at END,
+          approved_at = CASE WHEN @action = 'APPROVE' THEN @approvedAt ELSE approved_at END,
           rejection_reason = CASE
             WHEN @action = 'REJECT' THEN @reason
             WHEN @action IN ('SUBMIT', 'APPROVE') THEN NULL
@@ -521,6 +669,14 @@ export async function PATCH(request, context) {
       )
     }
 
+    if (action === REPLENISH_ACTIONS.CANCEL) {
+      await resetReplenishKeyHandover(
+        transaction,
+        workOrderId,
+        authorization.user.id
+      )
+    }
+
     await new sql.Request(transaction)
       .input("workOrderId", sql.BigInt, workOrderId)
       .input("fromStatus", sql.VarChar(40), current.status)
@@ -535,16 +691,58 @@ export async function PATCH(request, context) {
           (@workOrderId, @fromStatus, @toStatus, @action, @notes, @actorUserId);
       `)
 
-    await transaction.commit()
-    finished = true
+    let generatedAssignmentLetter = null
+    let approvedKeyHandover = null
+    if (action === REPLENISH_ACTIONS.APPROVE) {
+      generatedAssignmentLetter = await createApprovedAssignmentLetter(transaction, {
+        workOrderId,
+        approvedBy: authorization.user.id,
+        approvedAt,
+        scopeCodeUker: scope.isSuperAdmin ? null : scope.codeUker,
+      })
+      approvedKeyHandover = await freezeApprovedKeyHandover(transaction, {
+        workOrderId,
+        approvedBy: authorization.user.id,
+        approvedAt,
+      })
 
-    const updated = await getReplenishWorkOrderDetail(
-      db,
-      workOrderId,
-      scope.isSuperAdmin ? null : scope.codeUker
-    )
+      await insertAuditLog(transaction, {
+        request,
+        userId: authorization.user.id,
+        action: "AUTO_GENERATE",
+        module: "transactions.replenish.surat-tugas",
+        entityType: "replenish_assignment_letter",
+        entityId: generatedAssignmentLetter.id,
+        metadata: {
+          work_order_id: workOrderId,
+          work_order_no: current.work_order_no,
+          letter_no: generatedAssignmentLetter.letterNo,
+          document_hash: generatedAssignmentLetter.documentHash,
+          approval_hash: generatedAssignmentLetter.approvalHash,
+          source: "WORK_ORDER_FINAL_APPROVAL",
+        },
+      })
 
-    await writeAuditLog({
+      await insertAuditLog(transaction, {
+        request,
+        userId: authorization.user.id,
+        action: "AUTO_GENERATE_QR",
+        module: "transactions.replenish.key-handover",
+        entityType: "replenish_key_handover",
+        entityId: approvedKeyHandover.id,
+        metadata: {
+          work_order_id: workOrderId,
+          work_order_no: current.work_order_no,
+          giver_name: approvedKeyHandover.giver_name_snapshot,
+          giver_position: approvedKeyHandover.giver_position_snapshot,
+          recipient_name: approvedKeyHandover.recipient_name_snapshot,
+          recipient_position: approvedKeyHandover.recipient_position_snapshot,
+          source: "WORK_ORDER_FINAL_APPROVAL",
+        },
+      })
+    }
+
+    await insertAuditLog(transaction, {
       request,
       userId: authorization.user.id,
       action,
@@ -559,12 +757,25 @@ export async function PATCH(request, context) {
       },
     })
 
+    await transaction.commit()
+    finished = true
+
+    const updated = await getReplenishWorkOrderDetail(
+      db,
+      workOrderId,
+      scope.isSuperAdmin ? null : scope.codeUker
+    )
+
     return NextResponse.json(
       {
         success: true,
-        message: `Status ${current.work_order_no} berhasil diubah menjadi ${targetStatus}.`,
+        message: action === REPLENISH_ACTIONS.APPROVE
+          ? `Work Order ${current.work_order_no} berhasil disetujui. QR Surat Tugas dan Serah Terima Kunci telah terbentuk otomatis.`
+          : `Status ${current.work_order_no} berhasil diubah menjadi ${targetStatus}.`,
         data: {
           work_order: updated,
+          assignment_letter: generatedAssignmentLetter,
+          key_handover_approval: approvedKeyHandover,
           action_protocol: "SERVER_LOCKED_V2",
         },
       },

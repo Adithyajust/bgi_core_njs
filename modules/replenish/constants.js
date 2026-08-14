@@ -4,6 +4,36 @@ export const REPLENISH_ACTIVITY_TYPES = Object.freeze([
   "PERDANA",
 ])
 
+export const REPLENISH_KPI_MENU_HREF = "/kpi_admin_replenish"
+export const REPLENISH_FIELD_MENU_HREF = "/field_replenish"
+
+export const REPLENISH_FIELD_ACTIONS = Object.freeze({
+  CONFIRM_DEPARTURE: "CONFIRM_DEPARTURE",
+  START_TRIP: "START_TRIP",
+  ARRIVE_POINT: "ARRIVE_POINT",
+  START_POINT: "START_POINT",
+  COMPLETE_POINT: "COMPLETE_POINT",
+  REPORT_EXCEPTION: "REPORT_EXCEPTION",
+  APPROVE_EXCEPTION: "APPROVE_EXCEPTION",
+  REJECT_EXCEPTION: "REJECT_EXCEPTION",
+  START_RETURN: "START_RETURN",
+  ARRIVE_OFFICE: "ARRIVE_OFFICE",
+})
+
+export const REPLENISH_WORK_ORDER_ACTIVITY_TYPES = Object.freeze([
+  ...REPLENISH_ACTIVITY_TYPES,
+  "CAMPURAN",
+])
+
+export const REPLENISH_PAGU_OPTIONS = Object.freeze([
+  2000,
+  4000,
+  6000,
+  8000,
+])
+
+export const REPLENISH_DEFAULT_SHEETS_PER_CASSETTE = 2000
+
 export const REPLENISH_PRIORITIES = Object.freeze([
   "RENDAH",
   "NORMAL",
@@ -23,6 +53,7 @@ export const REPLENISH_WORK_ORDER_STATUSES = Object.freeze([
   "DISETUJUI",
   "MENUNGGU_VALIDASI_KASET",
   "KASET_DALAM_PERSIAPAN",
+  "MENUNGGU_APPROVAL_CPC",
   "KASET_SIAP",
   "MENUNGGU_PENYERAHAN_KUNCI",
   "SIAP_BERANGKAT",
@@ -46,6 +77,20 @@ export const REPLENISH_WORK_ORDER_STATUSES = Object.freeze([
   "DITUTUP",
   "DIBATALKAN",
 ])
+
+
+const REPLENISH_PRE_APPROVAL_OR_CANCELLED_STATUSES = new Set([
+  "DRAFT",
+  "MENUNGGU_PERSETUJUAN_TIM",
+  "DITOLAK",
+  "DIBATALKAN",
+])
+
+export function hasReplenishReachedApproval(status) {
+  const normalized = String(status || "").trim().toUpperCase()
+  return REPLENISH_WORK_ORDER_STATUSES.includes(normalized) &&
+    !REPLENISH_PRE_APPROVAL_OR_CANCELLED_STATUSES.has(normalized)
+}
 
 export const REPLENISH_POINT_STATUSES = Object.freeze([
   "TERJADWAL",

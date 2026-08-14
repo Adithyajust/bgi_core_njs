@@ -31,15 +31,21 @@ test("replenish list API uses cursor pagination and scope filtering", async () =
   assert.doesNotMatch(route, /\bOFFSET\b/i)
 })
 
-test("replenish mutations use transactions, row version, and audit trail", async () => {
+test("replenish mutations use bounded locking, row version, idempotency, and atomic audit", async () => {
   const createRoute = await read("app/api/transactions/replenish/route.js")
   const detailRoute = await read("app/api/transactions/replenish/[id]/route.js")
 
-  assert.match(createRoute, /ISOLATION_LEVEL\.SERIALIZABLE/)
+  assert.match(createRoute, /Idempotency-Key/)
+  assert.match(createRoute, /runInTransaction/)
+  assert.match(createRoute, /ISOLATION_LEVEL\.READ_COMMITTED/)
+  assert.match(createRoute, /insertAuditLog\(transaction/)
   assert.match(createRoute, /module: "transactions\.replenish"/)
   assert.match(createRoute, /entityType: "replenish_work_order"/)
   assert.match(detailRoute, /input\("rowVersion", sql\.Binary\(8\), lockedRowVersion\)/)
   assert.match(detailRoute, /AND row_version = @rowVersion;/)
+  assert.match(detailRoute, /UPDLOCK, HOLDLOCK/)
+  assert.match(detailRoute, /ISOLATION_LEVEL\.READ_COMMITTED/)
+  assert.match(detailRoute, /insertAuditLog\(transaction/)
   assert.match(detailRoute, /Pembuat work order tidak boleh menyetujui/i)
   assert.match(detailRoute, /isReplenishTeamApprover/)
   assert.match(detailRoute, /INSERT INTO dbo\.replenish_status_history/i)
@@ -53,7 +59,8 @@ test("replenish UI is connected to the transaction hub", async () => {
   assert.match(hub, /href="\/transactions\/replenish"/)
   assert.match(page, /Buat Work Order/)
   assert.match(page, /ReplenishAutocomplete/)
-  assert.match(page, /handleAction\(item, "SUBMIT"\)/)
+  assert.match(page, /onClick=\{\(\) => openDetail\(item\.id\)\}/)
+  assert.match(page, /handleAction\(detail, "SUBMIT"\)/)
   assert.match(page, /handleAction\(item, "APPROVE"\)/)
   assert.match(page, /Riwayat Status/)
 })
@@ -69,7 +76,8 @@ test("replenish compatibility migration follows the actual pegawai id type", asy
   assert.match(migration, /FK_replenish_team_employee/i)
   assert.match(migration, /ALTER COLUMN employee_id/i)
   assert.match(databaseModule, /input\("custodyId", sql\.BigInt/i)
-  assert.match(databaseModule, /input\("employeeId", sql\.BigInt/i)
+  assert.match(databaseModule, /input\("driverId", sql\.BigInt/i)
+  assert.match(databaseModule, /OPENJSON\(@pointsJson\)/i)
 })
 
 test("replenish stores escort as free text and only exposes active cars", async () => {
@@ -147,8 +155,8 @@ test("replenish employee options and backend enforce operational job titles", as
   assert.match(autocomplete, /teamRole/)
   assert.match(page, /teamRole="CUSTODY"/)
   assert.match(page, /teamRole="DRIVER"/)
-  assert.match(database, /ISNULL\(jabatan, ''\)[\s\S]*= 'CUSTODY'/i)
-  assert.match(database, /ISNULL\(jabatan, ''\)[\s\S]*= 'DRIVER'/i)
+  assert.match(database, /ISNULL\(p\.jabatan, ''\)[\s\S]*= 'CUSTODY'/i)
+  assert.match(database, /ISNULL\(p\.jabatan, ''\)[\s\S]*= 'DRIVER'/i)
   assert.match(database, /menjabat Custody/i)
   assert.match(database, /menjabat Driver/i)
 })
@@ -175,5 +183,37 @@ test("manager operasional receives a visible maker-checker approval queue", asyn
   assert.match(createRoute, /bertindak sebagai checker dan tidak dapat membuat work order/i)
   assert.match(page, /const approvalRole = isReplenishTeamApprover\(user\)/)
   assert.match(page, /Antrian Approval Manager Operasional/)
-  assert.match(page, /setStatusFilter\("MENUNGGU_PERSETUJUAN_TIM"\)/)
+  assert.match(page, /Tampilkan Antrian/)
+  assert.match(page, /Tampilkan Semua/)
+  assert.doesNotMatch(page, /approvalFilterInitialized/)
+})
+
+test("replenish timestamps are returned as local SQL Server wall-clock strings", async () => {
+  const route = await read("app/api/transactions/replenish/route.js")
+  const database = await read("modules/replenish/database.js")
+
+  assert.match(
+    route,
+    /CONVERT\(CHAR\(19\), wo\.created_at, 126\) AS created_at/i
+  )
+  assert.match(
+    route,
+    /CONVERT\(CHAR\(19\), wo\.updated_at, 126\) AS updated_at/i
+  )
+  assert.match(
+    database,
+    /CONVERT\(CHAR\(19\), history\.created_at, 126\) AS created_at/i
+  )
+  assert.match(
+    database,
+    /CONVERT\(CHAR\(19\), wo\.submitted_at, 126\) AS submitted_at/i
+  )
+  assert.match(
+    database,
+    /CONVERT\(CHAR\(19\), wo\.approved_at, 126\) AS approved_at/i
+  )
+  assert.match(
+    database,
+    /CONVERT\(CHAR\(19\), wo\.cancelled_at, 126\) AS cancelled_at/i
+  )
 })

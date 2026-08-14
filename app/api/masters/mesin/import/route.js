@@ -128,6 +128,17 @@ async function isTidSchemaEnabled(db) {
   return Boolean(result.recordset[0]?.tid_enabled)
 }
 
+async function isDenomSchemaEnabled(db) {
+  const result = await db.request().query(`
+    SELECT CASE
+      WHEN COL_LENGTH(N'dbo.master_mesin', N'denom') IS NULL THEN CAST(0 AS BIT)
+      ELSE CAST(1 AS BIT)
+    END AS denom_enabled;
+  `)
+
+  return Boolean(result.recordset[0]?.denom_enabled)
+}
+
 async function getLocationCategoryConstraintStatus(db, rows) {
   const result = await db
     .request()
@@ -427,6 +438,13 @@ export async function POST(request) {
       )
     }
 
+    if (!(await isDenomSchemaEnabled(db))) {
+      return createErrorResponse(
+        "Kolom Denom belum tersedia. Jalankan migration 030-add-master-mesin-denom.sql terlebih dahulu.",
+        409
+      )
+    }
+
     const [locationConstraint, operationTimeConstraint] = await Promise.all([
       getLocationCategoryConstraintStatus(db, normalizedRows),
       getOperationTimeConstraintStatus(db, normalizedRows),
@@ -593,6 +611,7 @@ export async function POST(request) {
         tid: row.tid,
         sn: row.sn,
         db: row.db || null,
+        denom: row.denom,
         cabang_id: Number(cabang.id),
         project_id: Number(project.id),
         lokasi: row.lokasi,
@@ -621,6 +640,7 @@ export async function POST(request) {
           tid VARCHAR(50) NOT NULL,
           sn VARCHAR(100) NOT NULL,
           db_value NVARCHAR(100) NULL,
+          denom NVARCHAR(50) NOT NULL,
           cabang_id INT NOT NULL,
           project_id BIGINT NOT NULL,
           lokasi NVARCHAR(500) NOT NULL,
@@ -642,6 +662,7 @@ export async function POST(request) {
           tid,
           sn,
           db_value,
+          denom,
           cabang_id,
           project_id,
           lokasi,
@@ -662,6 +683,7 @@ export async function POST(request) {
           tid,
           sn,
           db_value,
+          denom,
           cabang_id,
           project_id,
           lokasi,
@@ -682,6 +704,7 @@ export async function POST(request) {
           tid VARCHAR(50) '$.tid',
           sn VARCHAR(100) '$.sn',
           db_value NVARCHAR(100) '$.db',
+          denom NVARCHAR(50) '$.denom',
           cabang_id INT '$.cabang_id',
           project_id BIGINT '$.project_id',
           lokasi NVARCHAR(500) '$.lokasi',
@@ -725,6 +748,7 @@ export async function POST(request) {
           tid,
           sn,
           db,
+          denom,
           cabang_id,
           project_id,
           lokasi,
@@ -746,6 +770,7 @@ export async function POST(request) {
           source.tid,
           source.sn,
           source.db_value,
+          source.denom,
           source.cabang_id,
           source.project_id,
           source.lokasi,
@@ -785,6 +810,7 @@ export async function POST(request) {
         imported_count: importedCount,
         tids: insertRows.slice(0, 25).map((row) => row.tid),
         sns: insertRows.slice(0, 25).map((row) => row.sn),
+        denoms: Array.from(new Set(insertRows.map((row) => row.denom))).slice(0, 10),
         identifiers_truncated: insertRows.length > 25,
       },
     })

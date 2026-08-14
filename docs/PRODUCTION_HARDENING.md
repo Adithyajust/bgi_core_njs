@@ -1,149 +1,131 @@
-# Production Hardening
+# Production Hardening BGI Core
 
-Dokumen ini menjelaskan perubahan production hardening, cara deployment, dan batas pengujian proyek.
+Dokumen ini menjelaskan baseline keamanan, skalabilitas, deployment, dan verifikasi untuk source code hasil hardening.
 
-## 1. Persyaratan Runtime
+## Status
 
-- Node.js 20.9 sampai sebelum Node.js 25.
-- SQL Server dengan koneksi TLS untuk production.
-- Direktori private storage yang dapat ditulis oleh proses aplikasi.
-- Reverse proxy atau load balancer yang meneruskan header `X-Forwarded-For` secara tepercaya.
+Source telah diperbaiki untuk mengatasi temuan kritis pada transaksi Replenish, autentikasi, akses SQL Server, request perimeter, private storage, serta pipeline deployment. Perubahan ini tidak dapat dianggap sebagai jaminan bahwa aplikasi bebas dari seluruh kerentanan atau bottleneck pada semua kondisi. Release production tetap harus melewati migration test pada SQL Server target, load test dengan data representatif, dynamic application security testing, dan canary deployment.
 
-## 2. Environment Production
+## Runtime dan environment
 
-Salin `.env.example` ke secret manager atau environment deployment. Jangan menyimpan `.env` production di repository.
+Gunakan Node.js 22 dan instalasi deterministik melalui `npm ci`. Seluruh secret harus berasal dari secret manager, bukan file repository.
 
-Konfigurasi minimum:
+Konfigurasi minimum production:
 
 ```env
 NODE_ENV=production
+APP_ORIGIN=https://bgi.example.co.id
+SECURITY_REQUIRE_ORIGIN=true
+SECURITY_TRUST_PROXY_HEADERS=true
+SECURITY_MAX_API_BODY_BYTES=10485760
+SESSION_MAX_ACTIVE_PER_USER=5
+
 MSSQL_ENCRYPT=true
 MSSQL_TRUST_SERVER_CERTIFICATE=false
 MSSQL_POOL_MAX=20
+MSSQL_POOL_MIN=2
 MSSQL_REQUEST_TIMEOUT_MS=30000
-PEGAWAI_PHOTO_STORAGE_DIR=/var/lib/cro-njs/private/pegawai
+PEGAWAI_PHOTO_STORAGE_DIR=/var/lib/bgi-core/pegawai
 ```
 
-Gunakan akun database dengan hak minimum. Akun runtime tidak perlu memiliki hak membuat database. Jalankan migration dengan akun deployment terpisah jika organisasi menerapkan separation of duties.
+`SECURITY_TRUST_PROXY_HEADERS=true` hanya boleh digunakan bila reverse proxy menghapus header forwarding dari client dan menulis ulang header tersebut. `APP_ORIGIN` harus berisi origin tunggal yang benar, termasuk skema HTTPS.
 
-## 3. Migration
+## Perubahan performa transaksi
 
-Migration disimpan di `scripts/migrations` dan dijalankan berdasarkan urutan nama file.
+Jalur Replenish telah diubah sebagai berikut:
+
+- Detail ATM/CRM disimpan melalui satu operasi set-based `OPENJSON`, bukan satu query per titik.
+- Detail work order, titik, tim, dan histori dibaca dalam satu batch SQL, bukan empat request koneksi.
+- Daftar dan summary dikembalikan melalui satu batch SQL.
+- Summary global tidak lagi dihitung dari seluruh tabel pada setiap request. Migration 031 membuat tabel ringkasan yang dipelihara secara inkremental oleh trigger.
+- Validasi benturan kendaraan dan pegawai menggunakan indeks terpisah serta `sp_getapplock` dengan urutan resource deterministik.
+- Transaksi menggunakan `READ_COMMITTED` dengan row lock terarah, bukan `SERIALIZABLE` untuk seluruh alur.
+- Create work order wajib menggunakan `Idempotency-Key` UUID dan dilindungi unique index.
+- Deadlock/lock timeout create di-retry secara terbatas dan aman karena idempotensi.
+- Pencarian identifier menggunakan prefix search agar indeks dapat dimanfaatkan.
+- Audit transaksi ditulis di dalam transaksi bisnis yang sama.
+
+## Perubahan keamanan
+
+- Validasi Origin/Referer terhadap `APP_ORIGIN` untuk request mutasi.
+- Header CSP nonce, HSTS, frame denial, no-sniff, referrer policy, permissions policy, COOP, dan CORP.
+- Batas body global dan bounded JSON reader pada seluruh endpoint JSON.
+- SQL Server production menolak `trustServerCertificate=true` dan memerlukan konfigurasi database eksplisit.
+- Header proxy dan request ID hanya dipercaya bila konfigurasi proxy diaktifkan.
+- Token sesi acak 256-bit disimpan dalam bentuk hash.
+- Pencarian sesi dan touch aktivitas digabung menjadi satu batch database.
+- Pembuatan sesi diserialisasi per pengguna dan jumlah sesi aktif dibatasi.
+- Login username tidak dikenal tetap menjalankan bcrypt dummy untuk mengurangi timing enumeration.
+- Rate limit login berbasis IP dan akun tetap aktif, dengan cleanup dipindahkan dari hot path ke stored procedure terjadwal.
+- Foto pegawai dikeluarkan dari source package dan private storage.
+- Readiness endpoint tidak mengekspos statistik pool atau pesan internal database.
+
+## Migration
+
+Jalankan migration dengan akun deployment terpisah yang memiliki hak DDL. Akun aplikasi runtime sebaiknya hanya memiliki hak DML dan execute yang diperlukan.
 
 ```bash
 npm run db:migrate
 ```
 
-Runner akan:
+Migration `031-replenish-production-scalability.sql` menambahkan idempotency column/index, indeks konflik dan pagination, tabel ringkasan, trigger ringkasan, serta prosedur cleanup rate limit dan session.
 
-1. Membuat database jika belum tersedia.
-2. Membuat tabel `schema_migrations`.
-3. Menghitung SHA-256 setiap migration.
-4. Menolak migration yang sudah pernah dijalankan tetapi kemudian diubah.
-5. Menjalankan migration baru satu kali dan mencatat checksum.
+Pada database besar, jalankan migration dalam maintenance window karena pembuatan indeks dan backfill summary dapat mengunci atau menggunakan I/O signifikan. Backup dan uji restore wajib dilakukan sebelum migration.
 
-Jangan mengubah file migration yang sudah diterapkan. Buat file migration baru untuk setiap perubahan schema.
-
-Tidak ada akun dengan password default. Buat Super Admin pertama melalui:
+Setelah migration:
 
 ```bash
-npm run create:superadmin
+sqlcmd -S "$MSSQL_SERVER" -d "$MSSQL_DATABASE" -i scripts/ops/verify-replenish-production.sql
 ```
 
-Berikan kredensial melalui input aman pada terminal deployment, bukan melalui source code.
+Jadwalkan prosedur berikut melalui SQL Server Agent atau scheduler operasional minimal satu kali per hari:
 
-## 4. Permission
+```sql
+EXEC dbo.cleanup_security_rate_limits @retention_days = 2, @batch_size = 5000;
+EXEC dbo.cleanup_user_sessions @revoked_retention_days = 7, @batch_size = 5000;
+```
 
-Permission menu terdiri dari:
+## CI dan container
 
-- `can_view`
-- `can_create`
-- `can_update`
-- `can_delete`
+Repository menyediakan:
 
-API memeriksa permission berdasarkan aksi HTTP. Menyembunyikan tombol pada UI bukan kontrol keamanan. Route mutation tetap memeriksa permission di server.
+- `.github/workflows/ci.yml`: install deterministik, audit production dependencies, lint, test, migration SQL Server 2022, dan build.
+- `.github/workflows/codeql.yml`: static security analysis.
+- `.github/dependabot.yml`: pembaruan dependency dan GitHub Actions.
+- `Dockerfile`: multi-stage image, Next.js standalone, dan runtime non-root.
 
-Perubahan permission memerlukan `can_update` pada `/settings`. Super Admin tetap memperoleh seluruh permission.
+Migration tidak dijalankan otomatis saat container aplikasi dimulai. Jalankan migration sebagai deployment job tunggal sebelum rolling/canary deployment.
 
-## 5. Security Controls
+## Uji beban
 
-Kontrol yang ditambahkan:
-
-- Session token disimpan sebagai hash.
-- Akun dengan `must_change_password` tidak dapat membuka modul sebelum mengganti password.
-- Setelah password diganti, seluruh session lain milik akun tersebut dicabut.
-- Pembaruan aktivitas session dibatasi maksimal sekali setiap lima menit.
-- Validasi same-origin untuk request yang mengubah data.
-- Dual rate limit login berbasis IP dan kombinasi IP serta username.
-- Security headers, termasuk CSP, HSTS, frame denial, no-sniff, referrer policy, dan permissions policy.
-- TLS SQL Server dapat diwajibkan melalui environment.
-- Audit log untuk perubahan Master Mesin.
-- Foto pegawai disimpan di private storage dan dibaca melalui route terautentikasi.
-- Validasi magic byte untuk file foto.
-
-Pastikan reverse proxy menghapus header `X-Forwarded-For` dari client dan menulis nilainya sendiri. Tanpa konfigurasi ini, IP rate limiting dapat dipalsukan.
-
-## 6. Query Pattern Master Mesin
-
-Master Mesin menggunakan:
-
-- Server-side autocomplete dengan `q`, `limit`, `after_id`, dan `selected_id`.
-- Keyset pagination pada daftar utama.
-- Exact dan prefix search untuk TID serta SN.
-- Pencarian deskriptif terpisah untuk lokasi dan label relasi.
-- Endpoint summary terpisah dari endpoint list.
-- Optimistic concurrency menggunakan `ROWVERSION`.
-
-Update yang memakai row version lama mengembalikan HTTP `409 Conflict` agar perubahan pengguna lain tidak tertimpa.
-
-## 7. Health Check
-
-- `GET /api/health/live` untuk liveness proses.
-- `GET /api/health/ready` untuk readiness dan koneksi database.
-
-Jangan memakai readiness sebagai endpoint monitoring publik tanpa pembatasan jaringan. Response tidak menampilkan detail koneksi atau pesan error database.
-
-## 8. Testing
-
-Jalankan:
+Gunakan akun dan database khusus non-production:
 
 ```bash
-npm test
-npm run lint
-npm run build
+LOAD_BASE_URL=https://staging.example.co.id \
+LOAD_SESSION_COOKIE='<nilai-cookie>' \
+LOAD_CONCURRENCY=50 \
+LOAD_DURATION_SECONDS=60 \
+LOAD_MAX_P95_MS=1000 \
+node scripts/load/replenish-list-load.mjs
 ```
 
-Test saat ini mencakup:
+Minimal uji:
 
-- Mapping permission dan aksi HTTP.
-- Normalisasi pagination.
-- Search term dan wildcard escaping.
-- Validasi data Master Mesin.
-- Production guardrails untuk query, permission, default password, dan private photo storage.
+1. Daftar Replenish dengan 1 juta work order dan distribusi per unit kerja yang realistis.
+2. Create/update bersamaan pada tanggal, kendaraan, dan pegawai yang sama untuk memverifikasi conflict handling.
+3. Create bersamaan pada resource berbeda untuk mengukur throughput tanpa false serialization.
+4. Pool saturation pada jumlah instance production yang direncanakan.
+5. Failover SQL, timeout, deadlock, retry, dan idempotent replay.
 
-Tambahkan integration test dengan SQL Server disposable sebelum release. Unit test tidak dapat membuktikan migration dan query T-SQL berjalan pada versi SQL Server target.
+Target awal yang disarankan untuk staging adalah error rate di bawah 1%, p95 daftar di bawah 1 detik, tidak ada duplicate semantic transaction, dan tidak ada pertumbuhan antrean pool yang terus-menerus. Target final harus disesuaikan dengan SLA organisasi dan kapasitas SQL Server.
 
-## 9. Deployment Checklist
+## Release gate
 
-1. Buat dan commit `package-lock.json`, lalu gunakan `npm ci`.
-2. Jalankan test dan build pada CI.
-3. Backup database sebelum migration.
-4. Jalankan migration hanya satu kali dari deployment job.
-5. Gunakan rolling deployment setelah readiness berhasil.
-6. Pastikan private storage persisten dan tersedia pada seluruh instance, atau ganti dengan object storage.
-7. Jalankan `npm run storage:migrate-pegawai-photos` untuk instalasi lama, lalu aktifkan TLS antara aplikasi dan SQL Server.
-8. Batasi endpoint health pada jaringan monitoring.
-9. Kirim log aplikasi dan audit ke penyimpanan terpusat.
-10. Uji restore backup, bukan hanya proses backup.
+Release production hanya dilanjutkan bila seluruh kondisi berikut terpenuhi:
 
-## 10. Batas Saat Ini
-
-- Private storage lokal memerlukan shared persistent volume pada multi-instance deployment. Object storage tetap pilihan yang lebih baik.
-- Rate limiter SQL Server sesuai untuk skala kecil sampai menengah. Gunakan Redis ketika request autentikasi atau jumlah instance meningkat tajam.
-- Beberapa halaman lama masih memiliki komponen besar. Master Mesin sudah mulai dipisahkan menjadi constants, validation, search, dan pagination utility.
-- Workflow `.github/workflows/ci.yml` menyediakan unit test, lint, build, dan migration test menggunakan SQL Server 2022.
-- End-to-end test browser masih perlu ditambahkan untuk alur bisnis utama.
-
-## 11. Upgrade dari Initializer Lama
-
-Migration `000-00-legacy-schema-bridge.sql` mengadaptasi tabel `roles` dan `users` dari initializer lama. Akun demo persis `Admin Demo`, `Manager Corporate`, dan `Operator Cabang` dinonaktifkan karena initializer lama memakai password statis. Migration `000-z-legacy-menu-permissions.sql` memindahkan akses menu lama menjadi `can_view`. Hak create, update, dan delete harus diberikan ulang melalui halaman User Role.
+- `npm ci`, `npm audit --omit=dev --audit-level=high`, lint, 121 test, migration test, dan production build lulus di CI.
+- Script verifikasi database menghasilkan `OK`.
+- Execution plan tidak menunjukkan table scan besar pada query daftar dan konflik untuk data representatif.
+- Load test memenuhi SLA dan tidak menghasilkan deadlock berulang, timeout, atau pool pending yang meningkat.
+- DAST dan pengujian otorisasi horizontal/vertikal lulus.
+- Backup, restore, rollback aplikasi, dan prosedur respons insiden telah diuji.

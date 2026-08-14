@@ -73,11 +73,11 @@ export async function GET(request) {
       const result = await db
         .request()
         .input("limit", sql.Int, limit)
-        .input("search", sql.NVarChar(210), `%${escapeLike(search)}%`)
+        .input("search", sql.NVarChar(210), search ? `${escapeLike(search)}%` : "%")
         .query(`
           SELECT TOP (@limit) id, codeuker, nama_uker
           FROM dbo.master_uker
-          WHERE @search = '%%'
+          WHERE @search = '%'
              OR codeuker LIKE @search ESCAPE '\\'
              OR nama_uker LIKE @search ESCAPE '\\'
           ORDER BY nama_uker, id;
@@ -99,7 +99,7 @@ export async function GET(request) {
     const resolved = await resolveReplenishUker(db, scope, requestedUkerId)
     if (resolved.error) return responseError(resolved.error, 403)
 
-    const pattern = `%${escapeLike(search)}%`
+    const pattern = search ? `${escapeLike(search)}%` : "%"
 
     if (source === "machine") {
       const result = await db
@@ -113,16 +113,18 @@ export async function GET(request) {
             m.tid,
             m.sn,
             m.lokasi,
-            m.kategori_mesin
+            m.kategori_mesin,
+            m.denom
           FROM dbo.master_mesin m
           INNER JOIN dbo.master_project p ON p.id = m.project_id
           WHERE p.uker_id = @ukerId
             AND m.is_active = 1
             AND (
-              @search = '%%'
+              @search = '%'
               OR m.tid LIKE @search ESCAPE '\\'
               OR m.sn LIKE @search ESCAPE '\\'
               OR m.lokasi LIKE @search ESCAPE '\\'
+              OR m.denom LIKE @search ESCAPE '\\'
             )
           ORDER BY m.lokasi, m.id;
         `)
@@ -132,7 +134,7 @@ export async function GET(request) {
         data: {
           options: result.recordset.map((row) => ({
             value: String(row.id),
-            label: `${row.tid || row.sn} · ${row.lokasi}`,
+            label: `${row.tid || row.sn} · ${row.lokasi}${row.denom ? ` · Denom ${row.denom}` : ""}`,
             data: row,
           })),
         },
@@ -160,7 +162,7 @@ export async function GET(request) {
             AND status = 1
             AND UPPER(LTRIM(RTRIM(ISNULL(jabatan, '')))) = @requiredJobTitle
             AND (
-              @search = '%%'
+              @search = '%'
               OR nip LIKE @search ESCAPE '\\'
               OR nama LIKE @search ESCAPE '\\'
             )
@@ -197,7 +199,7 @@ export async function GET(request) {
           AND status = 'AKTIF'
           AND UPPER(LTRIM(RTRIM(jenis_kendaraan))) = 'MOBIL'
           AND (
-            @search = '%%'
+            @search = '%'
             OR nomor_kendaraan LIKE @search ESCAPE '\\'
             OR merk_kendaraan LIKE @search ESCAPE '\\'
           )

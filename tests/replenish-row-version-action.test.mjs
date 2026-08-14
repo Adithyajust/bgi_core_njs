@@ -31,7 +31,7 @@ test("replenish PATCH uses the binary row-version from the locked SQL row", asyn
   assert.match(route, /X-Replenish-Action-Protocol/)
   assert.match(route, /SERVER_LOCKED_V2/)
   assert.doesNotMatch(route, /const requestedRowVersion = normalizeRowVersionToken/)
-  assert.match(route, /ISOLATION_LEVEL\.SERIALIZABLE/)
+  assert.match(route, /ISOLATION_LEVEL\.READ_COMMITTED/)
   assert.match(route, /UPDLOCK, HOLDLOCK/)
 })
 
@@ -59,11 +59,12 @@ test("replenish edit UI and PUT do not depend on browser row-version tokens", as
   assert.doesNotMatch(putSection, /CONVERT\(BINARY\(8\), @rowVersion, 1\)/)
 })
 
-test("all replenish mutation protocols are server locked", async () => {
+test("all replenish mutation protocols use server locking with scoped isolation", async () => {
   const route = await read("app/api/transactions/replenish/[id]/route.js")
 
   assert.match(route, /X-Replenish-Update-Protocol/)
   assert.match(route, /X-Replenish-Action-Protocol/)
   assert.equal((route.match(/UPDLOCK, HOLDLOCK/g) || []).length, 1)
-  assert.match(route, /ISOLATION_LEVEL\.SERIALIZABLE/)
+  assert.match(route, /ISOLATION_LEVEL\.READ_COMMITTED/)
+  assert.doesNotMatch(route, /ISOLATION_LEVEL\.SERIALIZABLE/)
 })

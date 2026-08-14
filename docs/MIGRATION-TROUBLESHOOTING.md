@@ -49,3 +49,14 @@ Penyebabnya adalah tabel `roles` versi lama mempunyai kolom timestamp `NOT NULL`
 tanpa `DEFAULT` constraint. Migration `000-02-legacy-role-defaults.sql` menambahkan
 default untuk `is_active`, `created_at`, dan `updated_at` sebelum core schema
 menjalankan `MERGE` data role.
+
+## Surat Tugas otomatis setelah migration 034 pernah diterapkan
+
+Migration yang sudah tercatat pada `dbo.schema_migrations` bersifat immutable dan tidak boleh diedit.
+Untuk perubahan Surat Tugas otomatis, file `034-replenish-assignment-letter.sql` harus tetap menggunakan
+nilai default awal `MENUNGGU_PERSETUJUAN`. Perubahan default menjadi `DISETUJUI` dilakukan hanya oleh
+migration baru `035-replenish-assignment-letter-auto-generation.sql`.
+
+Jika muncul pesan `Migration 034-replenish-assignment-letter.sql berubah setelah diterapkan`, pulihkan
+file `034` dari versi yang pertama kali diterapkan lalu jalankan kembali `npm run db:migrate`. Jangan
+mengubah checksum secara manual dan jangan menghapus row `034` dari `dbo.schema_migrations`.

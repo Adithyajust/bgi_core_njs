@@ -86,6 +86,7 @@ const EMPTY_FORM = {
   tid: "",
   sn: "",
   db: "",
+  denom: "",
   cabang_id: "",
   project_id: "",
   lokasi: "",
@@ -177,6 +178,7 @@ function mapToForm(item) {
     tid: String(item?.tid || ""),
     sn: String(item?.sn || ""),
     db: String(item?.db || ""),
+    denom: String(item?.denom || ""),
     cabang_id: String(item?.cabang_id || ""),
     project_id: String(item?.project_id || ""),
     lokasi: String(item?.lokasi || ""),
@@ -960,6 +962,7 @@ export default function MasterMesinPage() {
   const [projectFilter, setProjectFilter] = useState("")
   const [tipeMesinFilter, setTipeMesinFilter] = useState("")
   const [kategoriMesinFilter, setKategoriMesinFilter] = useState("")
+  const [denomFilter, setDenomFilter] = useState("")
   const [kategoriLokasiFilter, setKategoriLokasiFilter] = useState("")
   const [siteFilter, setSiteFilter] = useState("")
   const [activeFilter, setActiveFilter] = useState("")
@@ -975,7 +978,7 @@ export default function MasterMesinPage() {
   const [optionsError, setOptionsError] = useState("")
   const [optionsLoading, setOptionsLoading] = useState(true)
   const [dataNotice, setDataNotice] = useState("")
-  const [schemaInfo, setSchemaInfo] = useState({ tid_enabled: true })
+  const [schemaInfo, setSchemaInfo] = useState({ tid_enabled: true, denom_enabled: true })
   const [permissionInfo, setPermissionInfo] = useState({
     can_view: true,
     can_create: false,
@@ -1030,7 +1033,10 @@ export default function MasterMesinPage() {
     [constantOptions.machine_categories]
   )
   const formOptionsReady =
-    schemaInfo.tid_enabled && !optionsLoading && !optionsError
+    schemaInfo.tid_enabled &&
+    schemaInfo.denom_enabled &&
+    !optionsLoading &&
+    !optionsError
   const importErrorRows = new Set(
     importErrors
       .map((error) => Number(error.row))
@@ -1080,7 +1086,7 @@ export default function MasterMesinPage() {
 
         if (!controller.signal.aborted) {
           setSchemaInfo(
-            optionsResult.data?.schema || { tid_enabled: true }
+            optionsResult.data?.schema || { tid_enabled: true, denom_enabled: true }
           )
           setPermissionInfo(
             optionsResult.data?.scope || {
@@ -1207,6 +1213,10 @@ export default function MasterMesinPage() {
           params.set("kategori_mesin", kategoriMesinFilter)
         }
 
+        if (denomFilter.trim()) {
+          params.set("denom", denomFilter.trim().toUpperCase())
+        }
+
         if (kategoriLokasiFilter) {
           params.set("kategori_lokasi", kategoriLokasiFilter)
         }
@@ -1238,7 +1248,7 @@ export default function MasterMesinPage() {
               next_cursor: null,
             }
           )
-          setSchemaInfo(result.data?.schema || { tid_enabled: true })
+          setSchemaInfo(result.data?.schema || { tid_enabled: true, denom_enabled: true })
           setDataNotice(String(result.data?.notice || ""))
         }
       } catch (error) {
@@ -1272,6 +1282,7 @@ export default function MasterMesinPage() {
   }, [
     activeFilter,
     cabangFilter,
+    denomFilter,
     kategoriLokasiFilter,
     kategoriMesinFilter,
     afterId,
@@ -1585,6 +1596,14 @@ export default function MasterMesinPage() {
       return "TID dan SN tidak boleh memiliki nilai yang sama."
     }
 
+    if (!form.denom.trim()) {
+      return "Denom wajib diisi."
+    }
+
+    if (form.denom.trim().length > 50) {
+      return "Denom maksimal 50 karakter."
+    }
+
     if (!form.cabang_id) {
       return "Cabang pengelola wajib dipilih."
     }
@@ -1661,6 +1680,7 @@ export default function MasterMesinPage() {
         tid: form.tid.trim().toUpperCase(),
         sn: form.sn.trim().toUpperCase(),
         db: form.db.trim(),
+        denom: form.denom.trim().toUpperCase(),
         cabang_id: Number(form.cabang_id),
         project_id: Number(form.project_id),
         lokasi: form.lokasi.trim(),
@@ -1748,6 +1768,7 @@ export default function MasterMesinPage() {
     setProjectFilter("")
     setTipeMesinFilter("")
     setKategoriMesinFilter("")
+    setDenomFilter("")
     setKategoriLokasiFilter("")
     setSiteFilter("")
     setActiveFilter("")
@@ -1764,8 +1785,8 @@ export default function MasterMesinPage() {
           </div>
           <h2>Master Mesin</h2>
           <p>
-            Kelola TID, identitas mesin, cabang pengelola, project, tipe mesin,
-            lokasi fisik, operasional, garansi, dan koordinat penempatan.
+            Kelola TID, identitas dan denom mesin, cabang pengelola, project,
+            tipe mesin, lokasi fisik, operasional, garansi, dan koordinat penempatan.
           </p>
         </div>
 
@@ -1783,7 +1804,9 @@ export default function MasterMesinPage() {
                 title={
                   !schemaInfo.tid_enabled
                     ? "Jalankan migration 011 terlebih dahulu"
-                    : optionsLoading
+                    : !schemaInfo.denom_enabled
+                      ? "Jalankan migration 030 terlebih dahulu"
+                      : optionsLoading
                       ? "Konfigurasi upload sedang dimuat"
                       : optionsError
                         ? "Konfigurasi upload gagal dimuat"
@@ -1800,7 +1823,9 @@ export default function MasterMesinPage() {
                 title={
                   !schemaInfo.tid_enabled
                     ? "Jalankan migration 011 terlebih dahulu"
-                    : optionsLoading
+                    : !schemaInfo.denom_enabled
+                      ? "Jalankan migration 030 terlebih dahulu"
+                      : optionsLoading
                       ? "Konfigurasi form sedang dimuat"
                       : optionsError
                         ? "Konfigurasi form gagal dimuat"
@@ -1847,7 +1872,7 @@ export default function MasterMesinPage() {
                 setSearchText(event.target.value)
                 resetListCursor()
               }}
-              placeholder="Cari TID, SN, DB, lokasi, Cabang, Project, Merk, atau model..."
+              placeholder="Cari TID, SN, DB, Denom, lokasi, Cabang, Project, Merk, atau model..."
               aria-label="Cari data Mesin"
             />
 
@@ -1910,6 +1935,17 @@ export default function MasterMesinPage() {
                   label: item,
                 })),
               ]}
+            />
+
+            <input
+              type="search"
+              value={denomFilter}
+              onChange={(event) => {
+                setDenomFilter(event.target.value.toUpperCase())
+                resetListCursor()
+              }}
+              placeholder="Filter Denom"
+              aria-label="Filter Denom Mesin"
             />
 
             <AutocompleteSelect
@@ -2015,7 +2051,18 @@ export default function MasterMesinPage() {
           </div>
         ) : null}
 
-        {dataNotice && schemaInfo.tid_enabled ? (
+        {!schemaInfo.denom_enabled ? (
+          <div className="user-role-alert warning">
+            <strong>Migration Denom belum dijalankan</strong>
+            <span>
+              Jalankan file {" "}
+              <code>030-add-master-mesin-denom.sql</code>{" "}
+              sebelum menambah, mengubah, atau mengupload data Mesin.
+            </span>
+          </div>
+        ) : null}
+
+        {dataNotice && schemaInfo.tid_enabled && schemaInfo.denom_enabled ? (
           <div className="user-role-alert info">
             <strong>Informasi data</strong>
             <span>{dataNotice}</span>
@@ -2035,6 +2082,7 @@ export default function MasterMesinPage() {
               <tr>
                 <th>TID</th>
                 <th>SN / DB</th>
+                <th>Denom</th>
                 <th>Cabang Pengelola</th>
                 <th>Project</th>
                 <th>Tipe Mesin</th>
@@ -2052,13 +2100,13 @@ export default function MasterMesinPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={canManage ? 14 : 13}>
+                  <td colSpan={canManage ? 15 : 14}>
                     <div className="user-role-loading">Memuat data Mesin...</div>
                   </td>
                 </tr>
               ) : mesins.length === 0 ? (
                 <tr>
-                  <td colSpan={canManage ? 14 : 13}>
+                  <td colSpan={canManage ? 15 : 14}>
                     <div className="user-role-empty">
                       Belum ada data Mesin yang sesuai filter.
                     </div>
@@ -2075,6 +2123,9 @@ export default function MasterMesinPage() {
                       <span className="project-cell-subtext">
                         DB: {item.db || "-"}
                       </span>
+                    </td>
+                    <td>
+                      <strong>{item.denom || "-"}</strong>
                     </td>
                     <td>
                       <strong>{item.nama_cabang || "Cabang tidak ditemukan"}</strong>
@@ -2456,6 +2507,7 @@ export default function MasterMesinPage() {
                             <th>Baris</th>
                             <th>TID</th>
                             <th>SN</th>
+                            <th>Denom</th>
                             <th>Cabang</th>
                             <th>Project</th>
                             <th>Tipe Mesin</th>
@@ -2478,6 +2530,7 @@ export default function MasterMesinPage() {
                                 <td>{row._row_number}</td>
                                 <td>{row.tid || "-"}</td>
                                 <td>{row.sn || "-"}</td>
+                                <td>{row.denom || "-"}</td>
                                 <td>{row.kode_cabang || "-"}</td>
                                 <td>{row.kode_project || "-"}</td>
                                 <td>
@@ -2604,6 +2657,21 @@ export default function MasterMesinPage() {
                     placeholder="Masukkan nilai DB"
                   />
                   <small>Disimpan sebagai teks sesuai struktur rancangan.</small>
+                </div>
+
+                <div className="user-role-form-field">
+                  <label htmlFor="denom">Denom *</label>
+                  <input
+                    id="denom"
+                    name="denom"
+                    value={form.denom}
+                    onChange={(event) =>
+                      updateForm("denom", event.target.value.toUpperCase())
+                    }
+                    maxLength={50}
+                    placeholder="Contoh: 50.000 / 100.000"
+                  />
+                  <small>Isi pecahan uang yang didukung mesin.</small>
                 </div>
 
                 <div className="user-role-form-field">

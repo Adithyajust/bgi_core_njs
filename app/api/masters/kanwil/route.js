@@ -1,3 +1,4 @@
+import { readJsonBody } from "@/lib/http/json-body"
 import { NextResponse } from "next/server"
 
 import { authorizeApiRequest } from "@/lib/access-control"
@@ -386,7 +387,7 @@ export async function POST(request) {
     let body
 
     try {
-      body = await request.json()
+      body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     } catch {
       return createErrorResponse("Format permintaan tidak valid.")
     }
@@ -479,7 +480,7 @@ export async function PUT(request) {
     let body
 
     try {
-      body = await request.json()
+      body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     } catch {
       return createErrorResponse("Format permintaan tidak valid.")
     }
@@ -611,7 +612,7 @@ export async function DELETE(request) {
     let body
 
     try {
-      body = await request.json()
+      body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     } catch {
       return createErrorResponse("Format permintaan tidak valid.")
     }

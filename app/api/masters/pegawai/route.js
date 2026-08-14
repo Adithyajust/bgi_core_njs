@@ -1,3 +1,4 @@
+import { readJsonBody } from "@/lib/http/json-body"
 import { NextResponse } from "next/server"
 
 import {
@@ -109,7 +110,7 @@ async function parsePegawaiRequest(request) {
   }
 
   return {
-    body: await request.json(),
+    body: await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 }),
     photoFile: null,
     removePhoto: false,
     isMultipart: false,
@@ -1055,7 +1056,7 @@ export async function DELETE(request) {
   if (forbiddenResponse) return forbiddenResponse
 
   try {
-    const body = await request.json()
+    const body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     const id = normalizeId(body.id)
     const deleteLinkedUser = normalizeBoolean(body.delete_linked_user, false)
 

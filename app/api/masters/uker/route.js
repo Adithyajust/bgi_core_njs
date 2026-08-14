@@ -1,3 +1,4 @@
+import { readJsonBody } from "@/lib/http/json-body"
 import { NextResponse } from "next/server"
 
 import { authorizeApiRequest, getUserDataScope } from "@/lib/access-control"
@@ -466,7 +467,7 @@ export async function POST(request) {
   }
 
   try {
-    const body = await request.json()
+    const body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     const validation = validateUkerPayload(body)
 
     if (validation.error) {
@@ -611,7 +612,7 @@ export async function PUT(request) {
   }
 
   try {
-    const body = await request.json()
+    const body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     const id = normalizeId(body.id)
 
     if (!id) {
@@ -793,7 +794,7 @@ export async function DELETE(request) {
   }
 
   try {
-    const body = await request.json()
+    const body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     const id = normalizeId(body.id)
 
     if (!id) {

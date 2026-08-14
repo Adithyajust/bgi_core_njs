@@ -3,6 +3,7 @@
 import Image from "next/image"
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
+import { getAuthenticatedHomePath } from "@/lib/default-route"
 
 async function readJsonResponse(response) {
   const contentType =
@@ -28,9 +29,9 @@ async function readJsonResponse(response) {
   return response.json()
 }
 
-function getRedirectPath() {
+function getRedirectPath(user) {
   if (typeof window === "undefined") {
-    return "/dashboard"
+    return getAuthenticatedHomePath(user)
   }
 
   const parameters =
@@ -50,7 +51,7 @@ function getRedirectPath() {
     return nextPath
   }
 
-  return "/dashboard"
+  return getAuthenticatedHomePath(user)
 }
 
 export default function LoginPage() {
@@ -93,7 +94,7 @@ export default function LoginPage() {
           router.replace(
             result.data?.mustChangePassword
               ? "/change-password"
-              : getRedirectPath()
+              : getRedirectPath(result.data)
           )
 
           return
@@ -171,7 +172,7 @@ export default function LoginPage() {
       router.replace(
         result.data?.mustChangePassword
           ? "/change-password"
-          : getRedirectPath()
+          : getRedirectPath(result.data)
       )
 
       router.refresh()

@@ -1,10 +1,13 @@
 import {
   MAX_REPLENISH_POINTS,
   REPLENISH_ACTIVITY_TYPES,
+  REPLENISH_PAGU_OPTIONS,
   REPLENISH_PRIORITIES,
 } from "./constants.js"
+import { deriveWorkOrderActivityType } from "./calculation.js"
 
 const ACTIVITY_TYPES = new Set(REPLENISH_ACTIVITY_TYPES)
+const PAGU_OPTIONS = new Set(REPLENISH_PAGU_OPTIONS)
 const PRIORITIES = new Set(REPLENISH_PRIORITIES)
 const MAX_ESCORT_NAME_LENGTH = 200
 
@@ -23,14 +26,9 @@ function normalizePositiveId(value) {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null
 }
 
-function normalizeMoney(value) {
-  if (value === null || value === undefined || value === "") return null
-
-  const normalized = String(value).trim().replaceAll(".", "").replace(",", ".")
-  if (!/^\d{1,15}(?:\.\d{1,2})?$/.test(normalized)) return null
-
-  const parsed = Number(normalized)
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
+function normalizePagu(value) {
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && PAGU_OPTIONS.has(parsed) ? parsed : null
 }
 
 function normalizeDate(value) {
@@ -53,23 +51,25 @@ function normalizeTime(value) {
   return normalized
 }
 
-function normalizePoint(point, index) {
+function normalizePoint(point, index, legacyActivityType) {
   const machineId = normalizePositiveId(point?.machine_id)
-  const requestedAmount = normalizeMoney(point?.requested_amount)
+  const activityType = normalizeText(point?.activity_type || legacyActivityType).toUpperCase()
+  const pagu = activityType === "PENGOSONGAN" ? null : normalizePagu(point?.pagu)
   const notes = normalizeNullableText(point?.notes, 500)
 
   if (!machineId) {
     return { error: `ATM/CRM pada urutan ${index + 1} tidak valid.` }
   }
 
-  if (
-    point?.requested_amount !== null &&
-    point?.requested_amount !== undefined &&
-    point?.requested_amount !== "" &&
-    requestedAmount === null
-  ) {
+  if (!ACTIVITY_TYPES.has(activityType)) {
     return {
-      error: `Nominal kebutuhan pada ATM/CRM urutan ${index + 1} tidak valid.`,
+      error: `Jenis aktivitas pada ATM/CRM urutan ${index + 1} tidak valid.`,
+    }
+  }
+
+  if (activityType !== "PENGOSONGAN" && !pagu) {
+    return {
+      error: `Pagu pada ATM/CRM urutan ${index + 1} wajib dipilih untuk Replenish Normal atau Pengisian Perdana dari 2000, 4000, 6000, atau 8000.`,
     }
   }
 
@@ -78,14 +78,18 @@ function normalizePoint(point, index) {
     value: {
       machineId,
       sequenceNo: index + 1,
-      requestedAmount,
+      activityType,
+      pagu,
       notes,
     },
   }
 }
 
 export function validateReplenishPayload(body = {}) {
-  const activityType = normalizeText(body.activity_type).toUpperCase()
+  const normalizedLegacyActivity = normalizeText(body.activity_type).toUpperCase()
+  const legacyActivityType = ACTIVITY_TYPES.has(normalizedLegacyActivity)
+    ? normalizedLegacyActivity
+    : null
   const priority = normalizeText(body.priority || "NORMAL").toUpperCase()
   const scheduleDate = normalizeDate(body.schedule_date)
   const departureTime = normalizeTime(body.departure_time)
@@ -98,10 +102,6 @@ export function validateReplenishPayload(body = {}) {
   const routeNotes = normalizeNullableText(body.route_notes, 1000)
   const notes = normalizeNullableText(body.notes, 1000)
   const rawPoints = Array.isArray(body.points) ? body.points : []
-
-  if (!ACTIVITY_TYPES.has(activityType)) {
-    return { error: "Jenis aktivitas replenish tidak valid.", data: null }
-  }
 
   if (!PRIORITIES.has(priority)) {
     return { error: "Prioritas work order tidak valid.", data: null }
@@ -164,7 +164,7 @@ export function validateReplenishPayload(body = {}) {
 
   const points = []
   for (let index = 0; index < rawPoints.length; index += 1) {
-    const result = normalizePoint(rawPoints[index], index)
+    const result = normalizePoint(rawPoints[index], index, legacyActivityType)
     if (result.error) return { error: result.error, data: null }
     points.push(result.value)
   }
@@ -177,7 +177,7 @@ export function validateReplenishPayload(body = {}) {
   return {
     error: null,
     data: {
-      activityType,
+      activityType: deriveWorkOrderActivityType(points),
       priority,
       scheduleDate,
       departureTime,

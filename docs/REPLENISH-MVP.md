@@ -55,7 +55,8 @@ dan Pengawalan—perlu ditambahkan pada tahap berikutnya.
 1. Permintaan kaset, validasi CPC, pengisian kaset, dan blotter.
 2. Master kaset dan status siklus kaset.
 3. Master kunci, barcode, BAST, dan pengembalian kunci.
-4. Aplikasi lapangan Custody: tiba lokasi, geolocation, bill count, set cash.
+4. Aplikasi lapangan Custody fase 1: PWA offline, GPS tahapan utama, pertukaran
+   kaset/segel per TID, dan review ketidaksesuaian (lihat `REPLENISH-FIELD-PWA.md`).
 5. Kode kombinasi terenkripsi dengan akses berjangka dan autentikasi ulang.
 6. Penerimaan kaset kembali, penghitungan CPC, dan rekonsiliasi.
 7. Tiket selisih, insiden, dashboard operasional, dan laporan.

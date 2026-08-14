@@ -1,3 +1,4 @@
+import { readJsonBody } from "@/lib/http/json-body"
 import bcrypt from "bcryptjs"
 import { NextResponse } from "next/server"
 
@@ -12,6 +13,7 @@ export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
 const ROLE_CODE_SUPER_ADMIN = "SUPER_ADMIN"
+const ROLE_CODE_CUSTODY = "CUSTODY"
 
 function createErrorResponse(message, status = 400) {
   return NextResponse.json(
@@ -35,6 +37,23 @@ function normalizeEmail(value) {
 
 function normalizeCodeUker(value) {
   return normalizeText(value).toUpperCase()
+}
+
+function normalizeOperationalIdentity(value) {
+  return normalizeText(value)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+}
+
+function validateRolePegawaiAlignment(role, pegawai) {
+  if (role?.role_code !== ROLE_CODE_CUSTODY) return null
+
+  if (normalizeOperationalIdentity(pegawai?.jabatan) !== ROLE_CODE_CUSTODY) {
+    return "Role Custody hanya dapat diberikan kepada pegawai aktif dengan jabatan Custody."
+  }
+
+  return null
 }
 
 function normalizeBoolean(value, defaultValue = true) {
@@ -563,7 +582,7 @@ export async function POST(request) {
   }
 
   try {
-    const body = await request.json()
+    const body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
 
     const username = normalizeText(body.username).toLowerCase()
     const password = typeof body.password === "string" ? body.password : ""
@@ -612,6 +631,11 @@ export async function POST(request) {
         "Pegawai tidak aktif dan tidak dapat dihubungkan dengan akun user.",
         409
       )
+    }
+
+    const rolePegawaiError = validateRolePegawaiAlignment(role, pegawai)
+    if (rolePegawaiError) {
+      return createErrorResponse(rolePegawaiError, 409)
     }
 
     const linkedUser = await ensurePegawaiIsAvailable(db, pegawaiId)
@@ -766,7 +790,7 @@ export async function PUT(request) {
   }
 
   try {
-    const body = await request.json()
+    const body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
 
     const userId = Number(body.id)
     const roleId = Number(body.role_id)
@@ -832,6 +856,11 @@ export async function PUT(request) {
         "Pegawai tidak aktif dan tidak dapat dihubungkan dengan akun user.",
         409
       )
+    }
+
+    const rolePegawaiError = validateRolePegawaiAlignment(targetRole, pegawai)
+    if (rolePegawaiError) {
+      return createErrorResponse(rolePegawaiError, 409)
     }
 
     const linkedUser = await ensurePegawaiIsAvailable(db, pegawaiId, userId)
@@ -1017,7 +1046,7 @@ export async function DELETE(request) {
   }
 
   try {
-    const body = await request.json()
+    const body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     const userId = Number(body.user_id ?? body.id)
 
     if (!Number.isInteger(userId) || userId <= 0) {
@@ -1134,7 +1163,7 @@ export async function PATCH(request) {
   }
 
   try {
-    const body = await request.json()
+    const body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     const action = normalizeText(body.action)
     const db = await connectDB()
 

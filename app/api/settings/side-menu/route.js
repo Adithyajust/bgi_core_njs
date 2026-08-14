@@ -1,3 +1,4 @@
+import { readJsonBody } from "@/lib/http/json-body"
 import { NextResponse } from "next/server"
 import { authorizeApiRequest } from "@/lib/access-control"
 import { connectDB, sql } from "@/lib/mssql"
@@ -187,7 +188,7 @@ export async function POST(request) {
     return authorization.response
   }
   try {
-    const body = await request.json()
+    const body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     const validation = validateMenuPayload(body)
 
     if (validation.error) {
@@ -303,7 +304,7 @@ export async function PUT(request) {
     return authorization.response
   }
   try {
-    const body = await request.json()
+    const body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     const validation = validateMenuPayload(body, true)
 
     if (validation.error) {

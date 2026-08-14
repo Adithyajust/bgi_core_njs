@@ -33,6 +33,7 @@ export function ReplenishAutocomplete({
   disabled = false,
   excludeValues = [],
   teamRole = null,
+  clearOnSelect = false,
 }) {
   const wrapperRef = useRef(null)
   const [query, setQuery] = useState(selected?.label || "")
@@ -44,7 +45,13 @@ export function ReplenishAutocomplete({
   const excludedValues = useMemo(() => new Set(excludeKey ? excludeKey.split("|") : []), [excludeKey])
 
   useEffect(() => {
-    setQuery(selected?.label || "")
+    let cancelled = false
+    queueMicrotask(() => {
+      if (!cancelled) setQuery(selected?.label || "")
+    })
+    return () => {
+      cancelled = true
+    }
   }, [selected])
 
   useEffect(() => {
@@ -59,8 +66,8 @@ export function ReplenishAutocomplete({
   useEffect(() => {
     if (!open || disabled) return undefined
     if (source !== "uker" && !ukerId) {
-      setOptions([])
-      return undefined
+      const timer = window.setTimeout(() => setOptions([]), 0)
+      return () => window.clearTimeout(timer)
     }
 
     const controller = new AbortController()
@@ -146,7 +153,8 @@ export function ReplenishAutocomplete({
                 type="button"
                 onClick={() => {
                   onSelect(option)
-                  setQuery(option.label)
+                  setQuery(clearOnSelect ? "" : option.label)
+                  if (clearOnSelect) setOptions([])
                   setOpen(false)
                 }}
               >

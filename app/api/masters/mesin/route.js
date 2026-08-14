@@ -1,3 +1,4 @@
+import { readJsonBody } from "@/lib/http/json-body"
 import { NextResponse } from "next/server"
 
 import { authorizeApiRequest, getUserDataScope, hasMenuAccess } from "@/lib/access-control"
@@ -210,11 +211,16 @@ async function getMasterMesinSchema(db) {
       CASE
         WHEN COL_LENGTH(N'dbo.master_mesin', N'tid') IS NULL THEN CAST(0 AS BIT)
         ELSE CAST(1 AS BIT)
-      END AS tid_enabled;
+      END AS tid_enabled,
+      CASE
+        WHEN COL_LENGTH(N'dbo.master_mesin', N'denom') IS NULL THEN CAST(0 AS BIT)
+        ELSE CAST(1 AS BIT)
+      END AS denom_enabled;
   `)
 
   return {
     tidEnabled: Boolean(result.recordset[0]?.tid_enabled),
+    denomEnabled: Boolean(result.recordset[0]?.denom_enabled),
   }
 }
 
@@ -322,10 +328,13 @@ async function isSnAvailable(db, sn, ignoredId = null) {
   return result.recordset.length === 0
 }
 
-async function getById(db, id, scopeCodeUker = null, schema = { tidEnabled: true }) {
+async function getById(db, id, scopeCodeUker = null, schema = { tidEnabled: true, denomEnabled: true }) {
   const tidSelect = schema.tidEnabled
     ? "ms.tid"
     : "CAST(NULL AS VARCHAR(50)) AS tid"
+  const denomSelect = schema.denomEnabled
+    ? "ms.denom"
+    : "CAST(NULL AS NVARCHAR(50)) AS denom"
 
   const result = await db
     .request()
@@ -337,6 +346,7 @@ async function getById(db, id, scopeCodeUker = null, schema = { tidEnabled: true
         ${tidSelect},
         ms.sn,
         ms.db,
+        ${denomSelect},
         ms.cabang_id,
         c.kode_cabang,
         c.nama_cabang,
@@ -477,6 +487,7 @@ export async function GET(request) {
           },
           schema: {
             tid_enabled: schema.tidEnabled,
+            denom_enabled: schema.denomEnabled,
           },
           constants: {
             machine_categories: machineCategoryResult.recordset
@@ -545,10 +556,10 @@ export async function GET(request) {
               AND c.id > @afterId
               AND (
                 @query = ''
-                OR c.kode_cabang LIKE @prefixPattern ESCAPE '\'
-                OR c.nama_cabang LIKE @containsPattern ESCAPE '\'
-                OR k.kode_kanwil LIKE @prefixPattern ESCAPE '\'
-                OR k.nama_kanwil LIKE @containsPattern ESCAPE '\'
+                OR c.kode_cabang LIKE @prefixPattern ESCAPE '\\'
+                OR c.nama_cabang LIKE @containsPattern ESCAPE '\\'
+                OR k.kode_kanwil LIKE @prefixPattern ESCAPE '\\'
+                OR k.nama_kanwil LIKE @containsPattern ESCAPE '\\'
               )
             ORDER BY c.id ASC;
           `)
@@ -598,9 +609,9 @@ export async function GET(request) {
               AND (@scopeCodeUker IS NULL OR mu.codeuker = @scopeCodeUker)
               AND (
                 @query = ''
-                OR p.kode_project LIKE @prefixPattern ESCAPE '\'
-                OR p.nama_project LIKE @containsPattern ESCAPE '\'
-                OR p.status_project LIKE @prefixPattern ESCAPE '\'
+                OR p.kode_project LIKE @prefixPattern ESCAPE '\\'
+                OR p.nama_project LIKE @containsPattern ESCAPE '\\'
+                OR p.status_project LIKE @prefixPattern ESCAPE '\\'
               )
             ORDER BY p.id ASC;
           `)
@@ -651,10 +662,10 @@ export async function GET(request) {
               AND t.id > @afterId
               AND (
                 @query = ''
-                OR t.jenis_mesin LIKE @containsPattern ESCAPE '\'
-                OR t.nama_model LIKE @containsPattern ESCAPE '\'
-                OR m.kode_merk LIKE @prefixPattern ESCAPE '\'
-                OR m.nama_merk LIKE @containsPattern ESCAPE '\'
+                OR t.jenis_mesin LIKE @containsPattern ESCAPE '\\'
+                OR t.nama_model LIKE @containsPattern ESCAPE '\\'
+                OR m.kode_merk LIKE @prefixPattern ESCAPE '\\'
+                OR m.nama_merk LIKE @containsPattern ESCAPE '\\'
               )
             ORDER BY t.id ASC;
           `)
@@ -783,6 +794,7 @@ export async function GET(request) {
     )
     const site = normalizeUpperText(searchParams.get("site"))
     const garansi = normalizeUpperText(searchParams.get("garansi"))
+    const denom = normalizeUpperText(searchParams.get("denom"))
 
     const listRequest = db
       .request()
@@ -805,6 +817,7 @@ export async function GET(request) {
         ms.sn = @searchExact
         OR ms.sn LIKE @searchPrefix ESCAPE '\\'
         OR ms.db LIKE @searchContains ESCAPE '\\'
+        ${schema.denomEnabled ? "OR ms.denom LIKE @searchContains ESCAPE '\\'" : ""}
         OR ms.lokasi LIKE @searchContains ESCAPE '\\'
         OR c.kode_cabang LIKE @searchContains ESCAPE '\\'
         OR c.nama_cabang LIKE @searchContains ESCAPE '\\'
@@ -833,6 +846,9 @@ export async function GET(request) {
     addFilter("cabangId", sql.Int, cabangId, "ms.cabang_id = @cabangId")
     addFilter("projectId", sql.BigInt, projectId, "ms.project_id = @projectId")
     addFilter("tipeMesinId", sql.Int, tipeMesinId, "ms.tipe_mesin_id = @tipeMesinId")
+    if (schema.denomEnabled) {
+      addFilter("denom", sql.NVarChar(50), denom, "ms.denom = @denom")
+    }
     addFilter(
       "kategoriMesin",
       sql.NVarChar(100),
@@ -859,6 +875,9 @@ export async function GET(request) {
     const tidSelect = schema.tidEnabled
       ? "ms.tid"
       : "CAST(NULL AS VARCHAR(50)) AS tid"
+    const denomSelect = schema.denomEnabled
+      ? "ms.denom"
+      : "CAST(NULL AS NVARCHAR(50)) AS denom"
 
     const listResult = await listRequest.query(`
       SELECT TOP (@fetchLimit)
@@ -866,6 +885,7 @@ export async function GET(request) {
         ${tidSelect},
         ms.sn,
         ms.db,
+        ${denomSelect},
         ms.cabang_id,
         c.kode_cabang,
         c.nama_cabang,
@@ -918,10 +938,15 @@ export async function GET(request) {
           has_more: hasMore,
           next_cursor: hasMore && lastItem ? String(lastItem.id) : null,
         },
-        schema: { tid_enabled: schema.tidEnabled },
+        schema: {
+          tid_enabled: schema.tidEnabled,
+          denom_enabled: schema.denomEnabled,
+        },
         notice: !schema.tidEnabled
           ? "Kolom TID belum tersedia di database. Jalankan migration 011 sebelum menambah atau mengubah Mesin."
-          : mesins.length === 0 && scope.codeUker
+          : !schema.denomEnabled
+            ? "Kolom Denom belum tersedia di database. Jalankan migration 030-add-master-mesin-denom.sql."
+            : mesins.length === 0 && scope.codeUker
             ? `Tidak ada data Mesin pada halaman ini untuk unit kerja ${scope.codeUker}.`
             : mesins.length === 0
               ? "Tidak ada data Mesin yang sesuai filter."
@@ -953,7 +978,7 @@ export async function POST(request) {
     let body
 
     try {
-      body = await request.json()
+      body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     } catch {
       return createErrorResponse("Format permintaan tidak valid.")
     }
@@ -970,6 +995,13 @@ export async function POST(request) {
     if (!schema.tidEnabled) {
       return createErrorResponse(
         "Kolom TID belum tersedia. Jalankan migration 011-add-master-mesin-tid.sql terlebih dahulu.",
+        409
+      )
+    }
+
+    if (!schema.denomEnabled) {
+      return createErrorResponse(
+        "Kolom Denom belum tersedia. Jalankan migration 030-add-master-mesin-denom.sql terlebih dahulu.",
         409
       )
     }
@@ -994,6 +1026,7 @@ export async function POST(request) {
       .input("tid", sql.VarChar(50), data.tid)
       .input("sn", sql.VarChar(100), data.sn)
       .input("dbValue", sql.NVarChar(100), data.dbValue)
+      .input("denom", sql.NVarChar(50), data.denom)
       .input("cabangId", sql.Int, data.cabangId)
       .input("projectId", sql.BigInt, data.projectId)
       .input("lokasi", sql.NVarChar(500), data.lokasi)
@@ -1013,6 +1046,7 @@ export async function POST(request) {
           tid,
           sn,
           db,
+          denom,
           cabang_id,
           project_id,
           lokasi,
@@ -1035,6 +1069,7 @@ export async function POST(request) {
           @tid,
           @sn,
           @dbValue,
+          @denom,
           @cabangId,
           @projectId,
           @lokasi,
@@ -1064,7 +1099,7 @@ export async function POST(request) {
       module: "masters.mesin",
       entityType: "master_mesin",
       entityId: createdId,
-      metadata: { tid: data.tid, sn: data.sn },
+      metadata: { tid: data.tid, sn: data.sn, denom: data.denom },
     })
 
     return NextResponse.json(
@@ -1133,7 +1168,7 @@ export async function PUT(request) {
     let body
 
     try {
-      body = await request.json()
+      body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     } catch {
       return createErrorResponse("Format permintaan tidak valid.")
     }
@@ -1159,6 +1194,13 @@ export async function PUT(request) {
     if (!schema.tidEnabled) {
       return createErrorResponse(
         "Kolom TID belum tersedia. Jalankan migration 011-add-master-mesin-tid.sql terlebih dahulu.",
+        409
+      )
+    }
+
+    if (!schema.denomEnabled) {
+      return createErrorResponse(
+        "Kolom Denom belum tersedia. Jalankan migration 030-add-master-mesin-denom.sql terlebih dahulu.",
         409
       )
     }
@@ -1221,6 +1263,7 @@ export async function PUT(request) {
       .input("tid", sql.VarChar(50), data.tid)
       .input("sn", sql.VarChar(100), data.sn)
       .input("dbValue", sql.NVarChar(100), data.dbValue)
+      .input("denom", sql.NVarChar(50), data.denom)
       .input("cabangId", sql.Int, data.cabangId)
       .input("projectId", sql.BigInt, data.projectId)
       .input("lokasi", sql.NVarChar(500), data.lokasi)
@@ -1241,6 +1284,7 @@ export async function PUT(request) {
           tid = @tid,
           sn = @sn,
           db = @dbValue,
+          denom = @denom,
           cabang_id = @cabangId,
           project_id = @projectId,
           lokasi = @lokasi,
@@ -1287,7 +1331,7 @@ export async function PUT(request) {
       module: "masters.mesin",
       entityType: "master_mesin",
       entityId: id,
-      metadata: { tid: data.tid, sn: data.sn },
+      metadata: { tid: data.tid, sn: data.sn, denom: data.denom },
     })
 
     return NextResponse.json({
@@ -1353,7 +1397,7 @@ export async function DELETE(request) {
     let body
 
     try {
-      body = await request.json()
+      body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     } catch {
       return createErrorResponse("Format permintaan tidak valid.")
     }

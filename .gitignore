@@ -2,28 +2,21 @@
 node_modules/
 .next/
 out/
-build/
 coverage/
 
-# Environment and local secrets
+# Environment files
 .env
 .env.*
 !.env.example
 
-# Runtime private storage
-storage/private/**
-!storage/private/**/.gitignore
-
-# Logs and operating-system files
+# Logs and local tooling
 *.log
 npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
 .DS_Store
-Thumbs.db
-
-# Editor files
 .vscode/
 .idea/
-*.swp
+
+# Private application storage
+storage/private/**
+!storage/private/**/
+!storage/private/**/.gitignore

@@ -16,6 +16,7 @@ const JABATAN_OPTIONS = [
   "General Affair",
   "Custody",
   "Driver",
+  "CPC",
 ]
 
 const EMPTY_PEGAWAI_FORM = {

@@ -1,3 +1,4 @@
+import { readJsonBody } from "@/lib/http/json-body"
 import { NextResponse } from "next/server"
 
 import {
@@ -641,7 +642,7 @@ export async function POST(request) {
   if (forbiddenResponse) return forbiddenResponse
 
   try {
-    const body = await request.json()
+    const body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     const validation = validateProjectPayload(body)
 
     if (validation.error) {
@@ -761,7 +762,7 @@ export async function PUT(request) {
   if (forbiddenResponse) return forbiddenResponse
 
   try {
-    const body = await request.json()
+    const body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     const id = normalizeId(body.id)
 
     if (!id) {
@@ -905,7 +906,7 @@ export async function DELETE(request) {
   if (forbiddenResponse) return forbiddenResponse
 
   try {
-    const body = await request.json()
+    const body = await readJsonBody(request, { maxBytes: 2 * 1024 * 1024 })
     const id = normalizeId(body.id)
 
     if (!id) {

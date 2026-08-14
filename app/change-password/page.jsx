@@ -8,6 +8,7 @@ import {
 } from "react"
 import { useRouter } from "next/navigation"
 import { useAppBootstrap } from "@/components/app-bootstrap-context"
+import { getAuthenticatedHomePath } from "@/lib/default-route"
 
 const PASSWORD_MIN_LENGTH = 10
 const PASSWORD_MAX_LENGTH = 72
@@ -333,7 +334,7 @@ export default function ChangePasswordPage() {
 
       redirectTimerRef.current =
         window.setTimeout(() => {
-          router.replace("/dashboard")
+          router.replace(getAuthenticatedHomePath(user))
           router.refresh()
         }, 1400)
     } catch (error) {
