@@ -8478,3 +8478,26 @@ button.machine-autocomplete-toggle:disabled {
   .cpc-kpi-toolbar button { width: 100%; }
   .cpc-kpi-pagination > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+
+/* RPL Terjadwal dropdown fix */
+.replenish-autocomplete-layer {
+  position: relative;
+  z-index: 50;
+}
+
+.replenish-autocomplete-menu-layer {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 280px;
+  overflow-y: auto;
+  z-index: 999;
+}
+
+/* Prevent parent panel from cutting dropdown */
+.panel,
+.replenish-table-panel {
+  overflow: visible;
+}

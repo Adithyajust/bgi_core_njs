@@ -2,7 +2,18 @@
 
 import { useEffect, useMemo, useRef, useState } from "react"
 
-async function loadOptions({ source, search, ukerId, teamRole, signal }) {
+async function loadOptions({ source, search, ukerId, teamRole, signal, optionsUrl }) {
+  if (optionsUrl) {
+    const query = new URLSearchParams()
+    if (search) query.set("search", search)
+    const separator = optionsUrl.includes("?") ? "&" : "?"
+    const response = await fetch(`${optionsUrl}${query.size ? `${separator}${query}` : ""}`, {
+      credentials: "include", cache: "no-store", signal,
+    })
+    const result = await response.json()
+    if (!response.ok || !result.success) throw new Error(result.message || "Gagal memuat pilihan.")
+    return Array.isArray(result.data?.options) ? result.data.options : []
+  }
   const query = new URLSearchParams({ source, limit: "20" })
   if (search) query.set("search", search)
   if (ukerId) query.set("uker_id", String(ukerId))
@@ -34,6 +45,7 @@ export function ReplenishAutocomplete({
   excludeValues = [],
   teamRole = null,
   clearOnSelect = false,
+  optionsUrl = "",
 }) {
   const wrapperRef = useRef(null)
   const [query, setQuery] = useState(selected?.label || "")
@@ -80,6 +92,7 @@ export function ReplenishAutocomplete({
         ukerId,
         teamRole,
         signal: controller.signal,
+        optionsUrl,
       })
         .then((items) => {
           if (controller.signal.aborted) return
@@ -99,7 +112,7 @@ export function ReplenishAutocomplete({
       window.clearTimeout(timer)
       controller.abort()
     }
-  }, [disabled, excludedValues, open, query, selected, source, teamRole, ukerId])
+  }, [disabled, excludedValues, open, optionsUrl, query, selected, source, teamRole, ukerId])
 
   function handleChange(event) {
     const next = event.target.value

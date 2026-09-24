@@ -16,6 +16,9 @@ npm-debug.log*
 .vscode/
 .idea/
 
+# Package zip files
+*.zip
+
 # Private application storage
 storage/private/**
 !storage/private/**/
