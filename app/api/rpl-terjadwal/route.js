@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises"
 import path from "node:path"
 import { parseWorkbook, UploadError } from "@/modules/rpl-terjadwal/workbook"
+import { getUserDataScope } from "@/lib/access-control"
 import { saveUpload, listUploads, getUploadRows, getReportData, saveReportEdit, listReportingUkerOptions, resolveReportingUker } from "@/modules/rpl-terjadwal/database"
 import { buildReport, STATUSES, validateEdit } from "@/modules/rpl-terjadwal/calculations"
 
@@ -19,7 +20,7 @@ export async function POST(request) {
     const params = new URL(request.url).searchParams
     const mode = params.get("mode")
     if (!["preview", "commit"].includes(mode)) throw new UploadError("Mode upload tidak valid.")
-    const selectedUker = await resolveReportingUker(params.get("uker_id"))
+    const selectedUker = await resolveReportingUker(params.get("uker_id"), getUserDataScope(auth.user))
     const unit = (selectedUker?.nama_uker || "").trim()
     const fileName = (params.get("file_name") || "").split(/[\\/]/).pop()
     if (!unit || unit.length > 150) throw new UploadError("Pilih unit pelaporan yang valid dari Master Uker.")
@@ -79,7 +80,7 @@ export async function GET(request) {
     const auth = await authorize(request, "view")
     if (!auth.authorized) return auth.response
     const params = new URL(request.url).searchParams
-    if (params.get("uker_options") === "1") return json({ success: true, data: { options: await listReportingUkerOptions(params.get("search")) } })
+    if (params.get("uker_options") === "1") return json({ success: true, data: { options: await listReportingUkerOptions(params.get("search"), getUserDataScope(auth.user)) } })
     if (params.get("template") === "1") {
       const bytes = await readFile(path.join(process.cwd(), "modules/rpl-terjadwal/templates/RPL-Template-Upload.xlsx"))
       return new Response(bytes, { headers: { "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Content-Disposition": 'attachment; filename="RPL-Template-Upload.xlsx"', "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } })

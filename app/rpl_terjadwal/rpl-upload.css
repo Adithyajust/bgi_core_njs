@@ -3,13 +3,8 @@
 .rpl-upload-fields { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 18px; margin: 24px 0; }
 .rpl-upload label { display: grid; gap: 8px; font-size: 13px; font-weight: 700; min-width: 0; }
 .rpl-upload input { width: 100%; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: white; color: var(--ink); }
-.rpl-upload-uker { position: relative; z-index: 100; overflow: visible; }
-.rpl-upload-uker .replenish-autocomplete { position: relative; z-index: 100; }
-.rpl-upload-uker .replenish-autocomplete-menu { 
-  z-index: 9999; 
-  position: absolute;
-}
-.rpl-upload-fields { overflow: visible; }
+.rpl-upload-uker { position: relative; z-index: 3; }
+.rpl-upload-uker .replenish-autocomplete-menu { z-index: 30; }
 .rpl-upload input:focus-visible, .rpl-upload button:focus-visible, .rpl-upload-table:focus-visible { outline: 3px solid var(--orange); outline-offset: 3px; }
 .rpl-upload small { color: var(--muted); font-weight: 400; }
 .rpl-upload-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 20px 0; }
@@ -60,3 +55,17 @@
 @media (max-width: 1000px) { .rpl-upload-fields { grid-template-columns: 1fr 1fr; } .rpl-upload-fields label:last-child { grid-column: 1 / -1; } .rpl-upload-metrics { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 620px) { .rpl-upload-fields { grid-template-columns: 1fr; } .rpl-upload-actions label { width: 100%; margin-left: 0; min-width: 0; } .rpl-upload-metrics { grid-template-columns: 1fr; } .rpl-report-filters, .rpl-edit-fields { grid-template-columns: 1fr; } .rpl-sheet-tabs { flex-wrap: nowrap; overflow-x: auto; } .rpl-sheet-tabs button { flex-shrink: 0; } .rpl-editor { padding: 8px 12px; } }
 @media (max-width: 620px) { .rpl-schedule .rpl-freeze-1 { position: static; } }
+
+/* Dropdown Uker portal fix */
+.rpl-upload-uker {
+  position: relative;
+  z-index: 100;
+}
+.replenish-autocomplete-menu-portal {
+  max-height: 300px;
+  overflow-y: auto;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.15);
+}

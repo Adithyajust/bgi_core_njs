@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises"
+import { getUserDataScope } from "@/lib/access-control"
 import path from "node:path"
 import { authorize, errorResponse, json, readBytes } from "@/modules/rpl-terjadwal/http"
 import { UploadError } from "@/modules/rpl-terjadwal/workbook"
@@ -9,8 +10,8 @@ import { resolveReportingUker } from "@/modules/rpl-terjadwal/database"
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
-async function unitId(value) {
-  const unit = await resolveReportingUker(value)
+async function unitId(value, user) {
+  const unit = await resolveReportingUker(value, getUserDataScope(user))
   if (!unit) throw new UploadError("Pilih unit pelaporan yang valid dari Master Uker.")
   return Number(unit.id)
 }
@@ -24,7 +25,7 @@ export async function GET(request) {
       const bytes = await readFile(path.join(process.cwd(), "modules/rpl-terjadwal/templates/RPL-Template-Parameter.xlsx"))
       return new Response(bytes, { headers: { "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Content-Disposition": 'attachment; filename="RPL-Template-Parameter.xlsx"', "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } })
     }
-    const ukerId = await unitId(params.get("uker_id"))
+    const ukerId = await unitId(params.get("uker_id"), auth.user)
     const page = Number(params.get("page") || 0)
     if (!Number.isInteger(page) || page < 0 || page > 400) throw new UploadError("Halaman parameter tidak valid.", 400)
     const data = await getParameterMaster(ukerId)
@@ -42,7 +43,7 @@ export async function POST(request) {
     const params = new URL(request.url).searchParams
     const mode = params.get("mode")
     if (!["preview", "commit"].includes(mode)) throw new UploadError("Mode upload parameter tidak valid.")
-    const ukerId = await unitId(params.get("uker_id"))
+    const ukerId = await unitId(params.get("uker_id"), auth.user)
     const fileName = (params.get("file_name") || "").split(/[\\/]/).pop()
     if (!fileName || fileName.length > 255 || !/\.xlsx$/i.test(fileName)) throw new UploadError("Pilih file parameter .xlsx.")
     const data = parseParameterWorkbook(await readBytes(request))
@@ -67,7 +68,7 @@ export async function PATCH(request) {
     const bytes = await readBytes(request, 64 * 1024)
     try { input = JSON.parse(bytes.toString("utf8")) } catch { throw new UploadError("Data perubahan bukan JSON yang valid.") }
     if (!input || typeof input !== "object" || Array.isArray(input)) throw new UploadError("Data perubahan parameter tidak valid.")
-    const ukerId = await unitId(input.uker_id)
+    const ukerId = await unitId(input.uker_id, auth.user)
     const revision = validateRevision(input.revision)
     let data
     if (input.type === "apply") {

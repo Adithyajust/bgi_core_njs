@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 
 async function loadOptions({ source, search, ukerId, teamRole, signal, optionsUrl }) {
   if (optionsUrl) {
@@ -53,6 +54,7 @@ export function ReplenishAutocomplete({
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
+  const [menuPosition, setMenuPosition] = useState(null)
   const excludeKey = excludeValues.map(String).sort().join("|")
   const excludedValues = useMemo(() => new Set(excludeKey ? excludeKey.split("|") : []), [excludeKey])
 
@@ -114,6 +116,16 @@ export function ReplenishAutocomplete({
     }
   }, [disabled, excludedValues, open, optionsUrl, query, selected, source, teamRole, ukerId])
 
+  function updateMenuPosition() {
+    const rect = wrapperRef.current?.getBoundingClientRect()
+    if (!rect) return
+    setMenuPosition({
+      top: rect.bottom + 4,
+      left: rect.left,
+      width: rect.width,
+    })
+  }
+
   function handleChange(event) {
     const next = event.target.value
     setQuery(next)
@@ -128,7 +140,7 @@ export function ReplenishAutocomplete({
           type="text"
           value={query}
           onChange={handleChange}
-          onFocus={() => setOpen(true)}
+          onFocus={() => { setOpen(true); updateMenuPosition() }}
           placeholder={placeholder}
           disabled={disabled}
           autoComplete="off"
@@ -149,8 +161,14 @@ export function ReplenishAutocomplete({
         ) : null}
       </div>
 
-      {open && !disabled ? (
-        <div className="replenish-autocomplete-menu">
+      {open && !disabled && typeof document !== "undefined" && menuPosition ? createPortal(
+        <div className="replenish-autocomplete-menu replenish-autocomplete-menu-portal" style={{
+          position: "fixed",
+          top: menuPosition.top,
+          left: menuPosition.left,
+          width: menuPosition.width,
+          zIndex: 999999
+        }}>
           {source !== "uker" && !ukerId ? (
             <p>Pilih unit kerja terlebih dahulu.</p>
           ) : loading ? (
@@ -175,7 +193,8 @@ export function ReplenishAutocomplete({
               </button>
             ))
           )}
-        </div>
+        </div>,
+        document.body
       ) : null}
     </div>
   )

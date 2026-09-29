@@ -7,25 +7,37 @@ function escapeLike(value) {
   return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_").replaceAll("[", "\\[")
 }
 
-export async function listReportingUkerOptions(search = "") {
+export async function listReportingUkerOptions(search = "", scope = {}) {
   const normalizedSearch = String(search || "").trim().slice(0, 100)
   const db = await connectDB()
   const result = await db.request()
     .input("search", sql.NVarChar(210), normalizedSearch ? `%${escapeLike(normalizedSearch)}%` : "%")
+    .input("scopeCodeUker", sql.NVarChar(15), scope.isSuperAdmin ? null : (scope.codeUker || null))
     .query(`SELECT TOP (20) id, codeuker, nama_uker
       FROM dbo.master_uker
-      WHERE @search = '%' OR nama_uker LIKE @search ESCAPE '\\'
+      WHERE (@search = '%' OR nama_uker LIKE @search ESCAPE '\\')
+      AND (@scopeCodeUker IS NULL OR codeuker = @scopeCodeUker)
       ORDER BY nama_uker ASC, id ASC;`)
   return result.recordset.map(row => ({ value: String(row.id), label: row.nama_uker, data: row }))
 }
 
-export async function resolveReportingUker(id) {
+export async function resolveReportingUker(id, scope) {
   const parsedId = Number(id)
   if (!Number.isSafeInteger(parsedId) || parsedId < 1) return null
   const db = await connectDB()
-  const result = await db.request().input("id", sql.BigInt, parsedId)
-    .query("SELECT TOP (1) id, codeuker, nama_uker FROM dbo.master_uker WHERE id = @id;")
-  return result.recordset[0] || null
+  const result = await db.request()
+    .input("id", sql.BigInt, parsedId)
+    .input("scopeCodeUker", sql.NVarChar(15), scope.isSuperAdmin ? null : (scope.codeUker || null))
+    .query("SELECT TOP (1) id, codeuker, nama_uker FROM dbo.master_uker WHERE id = @id AND (@scopeCodeUker IS NULL OR codeuker = @scopeCodeUker);")
+  const row = result.recordset[0]
+  if (!row) return null
+
+  // Validasi akses user terhadap unit kerja
+  if (scope.codeUker && row.codeuker !== scope.codeUker) {
+    throw new Error("User tidak memiliki akses terhadap unit kerja ini.");
+  }
+
+  return row
 }
 
 export async function saveUpload(data, { fileName, unit, ukerId, user, request }) {

@@ -1,0 +1,170 @@
+{
+  "version": 4,
+  "description": "Upload parameter TID mandiri per unit dan format detail A-J sesuai lampiran pengguna.",
+  "base_archive_sha256": "24f60c7701382d998e4497e914b922b595df3337317c2e8ba59988a4be8651f3",
+  "new_migration": "057-rpl-independent-tid-parameters.sql",
+  "files": [
+    {
+      "path": "PETUNJUK-UPDATE-RPL-v3.md",
+      "operation": "modified",
+      "sha256": "6606c395d94173f8150a3dd038c5c4086a78cb9f49d26cf8b5ed64466cb43e8b",
+      "previous_sha256": "4a64fb1adb95383189f3652694be0e7f71f3a19895770a76a9bdccc7f5448e80"
+    },
+    {
+      "path": "PETUNJUK-UPDATE-RPL-v4.md",
+      "operation": "added",
+      "sha256": "b0d9748c4696014e2f05261b0b614d54281ac633ae95de177837e9ffe4e7b713",
+      "previous_sha256": null
+    },
+    {
+      "path": "app/api/rpl-terjadwal/parameters/route.js",
+      "operation": "added",
+      "sha256": "d5e5aa7b1947adb9d9db6b5f2dde3e04dd39095e1161fcb46afb6bd3c42c2351",
+      "previous_sha256": null
+    },
+    {
+      "path": "app/api/rpl-terjadwal/route.js",
+      "operation": "modified",
+      "sha256": "d2b2b9e034aaaa676fbaaa188fc60fa5ab5b82f2151981a3935205aa30eaec20",
+      "previous_sha256": "385960b2bc8a779ca22052848405ee6fad6ea6884bcfd9141d13586cad81ae06"
+    },
+    {
+      "path": "app/rpl_terjadwal/parameter-client.jsx",
+      "operation": "added",
+      "sha256": "365b893324658d8b7a8118a72003e0275a30e167ad723ebc572cf3668bbe92f0",
+      "previous_sha256": null
+    },
+    {
+      "path": "app/rpl_terjadwal/report-client.jsx",
+      "operation": "modified",
+      "sha256": "c43b323a3d2f40a09bf7d92da751ea88e7992c1ced80c1b915019cd8b62e5b7d",
+      "previous_sha256": "1e03afc18eb8b4dd38379e9a49d5452311d9c5b052d22ddbf1cd354755779ba9"
+    },
+    {
+      "path": "app/rpl_terjadwal/rpl-upload.css",
+      "operation": "modified",
+      "sha256": "77deee1bfaf96756b008a2e69c02874a8e9f4ebc3225c080d87026a3c70976af",
+      "previous_sha256": "1304f599a9cfa064f6d2e0022a46eb28da15c491dd1652ecc00400c7d6066918"
+    },
+    {
+      "path": "app/rpl_terjadwal/upload-client.jsx",
+      "operation": "modified",
+      "sha256": "e4575fbd3e715fee6748d28be633835e94dcf2ec367c57d16f80dd94df26c4a1",
+      "previous_sha256": "d3338128dce0178635e35cd1522ad2c6f1c59a00a79df0c327b5bf126e7af3d5"
+    },
+    {
+      "path": "docs/RPL-TERJADWAL-UPLOAD.md",
+      "operation": "modified",
+      "sha256": "0696b5b0763a6fe041cbc286ab8d28c16a54be065f051cf2d5227b6ff56a8f49",
+      "previous_sha256": "7b0ac24ae681a11690c90e2aa3259913462e511d7c2512e0b48cd9625bdc6ca2"
+    },
+    {
+      "path": "modules/rpl-terjadwal/calculations.js",
+      "operation": "modified",
+      "sha256": "b962c801efce6b00c06028201b39ab1bd14450453b17b611cca20616fadf1062",
+      "previous_sha256": "d35a52933f0a70adf1309d922eb9b615d480e8819f9b64683fd0a5c4062c8cc1"
+    },
+    {
+      "path": "modules/rpl-terjadwal/database.js",
+      "operation": "modified",
+      "sha256": "f26242b888b6658a5e2a97cca0d159ec67b11aac299602ef2d899055d4779e56",
+      "previous_sha256": "ecde5bf4a108b7a512adb6d6be687d2d81d5cf2dca691fc3e8a13ea35199e75d"
+    },
+    {
+      "path": "modules/rpl-terjadwal/http.js",
+      "operation": "added",
+      "sha256": "8ef4d362f1300de8ebc873fdafc0026bf63a8d1da04ec5a9f421a6a68d87f713",
+      "previous_sha256": null
+    },
+    {
+      "path": "modules/rpl-terjadwal/parameter-database.js",
+      "operation": "added",
+      "sha256": "e5ff1de965380580ade18dc37e3153f46c58f3514fa9e432c40cd0dbe3bd1f3e",
+      "previous_sha256": null
+    },
+    {
+      "path": "modules/rpl-terjadwal/parameters.js",
+      "operation": "added",
+      "sha256": "3662bc0db1fdd70507cfab036811e7219ec77860b8b5f8721664fb9fb3f2c3d5",
+      "previous_sha256": null
+    },
+    {
+      "path": "modules/rpl-terjadwal/templates/RPL-Template-Parameter.xlsx",
+      "operation": "added",
+      "sha256": "afd23bdd8c17695f00f723a54c573c0e70105da677682cfeeb6c8be58c70fe00",
+      "previous_sha256": null
+    },
+    {
+      "path": "modules/rpl-terjadwal/templates/RPL-Template-Upload.xlsx",
+      "operation": "modified",
+      "sha256": "ad87482c9ea75b06aa03d9115c83b10af327675c77ea8d95fda1b948ace82d98",
+      "previous_sha256": "db8d82b9fdaf831b0243e4838f7b63a71cf85f36af58330fcf4f257d07f89444"
+    },
+    {
+      "path": "modules/rpl-terjadwal/workbook.js",
+      "operation": "modified",
+      "sha256": "4be6fa229ddc7bdd692db0bf232cf9c2c21fef65fe01275260e83bf2da2e536a",
+      "previous_sha256": "7bc195fe90b970e5a8e6551b528e2dce5240c5fdce45f4154159c05f7572fa13"
+    },
+    {
+      "path": "scripts/migrations/057-rpl-independent-tid-parameters.sql",
+      "operation": "added",
+      "sha256": "687db5e6ba1054a941deb0f219242e083b56357c7fe310ebf098481686c9bd4e",
+      "previous_sha256": null
+    },
+    {
+      "path": "tests/fixtures/rpl-upload-v4-reference.xlsx",
+      "operation": "added",
+      "sha256": "6813cf18fecd17c102e78f055134350697154e607d47a807031aeb59b963bb80",
+      "previous_sha256": null
+    },
+    {
+      "path": "tests/helpers/rpl-xlsx.mjs",
+      "operation": "added",
+      "sha256": "6319cd33bc52ce5f98ebcd72cad7f9632337edbe9bbe79d640048a2ec0d0762a",
+      "previous_sha256": null
+    },
+    {
+      "path": "tests/rpl-api.test.mjs",
+      "operation": "modified",
+      "sha256": "494011f2f58afb46d58654b9ac49a648e5c011d9cb571e5d766ac3de48eaa417",
+      "previous_sha256": "a81189ea59420b2726be8aaef7851faf6d633412d6a995ca6852498dd4f723ef"
+    },
+    {
+      "path": "tests/rpl-parameter-transactions.test.mjs",
+      "operation": "added",
+      "sha256": "21e9226f6a2284b3882c0dc05c3eef0676f58b54e46387ef2b9ddbe952501be8",
+      "previous_sha256": null
+    },
+    {
+      "path": "tests/rpl-parameters.test.mjs",
+      "operation": "added",
+      "sha256": "6984f0043e116fc573ac692914b0ffb6372061e85cf2fc7c7540dec7b2bc3e2e",
+      "previous_sha256": null
+    },
+    {
+      "path": "tests/rpl-upload.test.mjs",
+      "operation": "modified",
+      "sha256": "7e71aa3185f41b2afcca601f5bdb7eaa114a2b8c38618a62fffa7c032d2b5743",
+      "previous_sha256": "50c13c7258bbe7c15f4437010a8ea45eb51c9bb2ddeb4877773b5d941e646f96"
+    }
+  ],
+  "verification": {
+    "rpl_tests": {
+      "passed": 53,
+      "failed": 0,
+      "skipped": 2
+    },
+    "project_tests": {
+      "passed": 327,
+      "failed": 1,
+      "skipped": 2,
+      "existing_failure": "Missing root Git ignore file in the source archive."
+    },
+    "javascript_syntax": "passed",
+    "jsx_compilation": "passed",
+    "template_parser_and_visual_review": "passed",
+    "sql_server_integration": "not_run",
+    "next_build_and_lint": "not_verified"
+  }
+}
