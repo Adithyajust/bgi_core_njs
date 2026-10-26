@@ -85,7 +85,7 @@ export default function RplUpload() {
   }
 
   return <div className="simple-page rpl-upload">
-    <section className="page-heading-card"><p className="eyebrow">Replenish Management · Super Admin</p><h2>RPL Terjadwal</h2><p>Upload Perencanaan dan DSR, evaluasi akurasi, lalu bandingkan jadwal dengan realisasi per tanggal.</p></section>
+    <section className="page-heading-card"><p className="eyebrow">Replenish Management</p><h2>RPL Terjadwal</h2><p>Upload Perencanaan dan DSR, evaluasi akurasi, lalu bandingkan jadwal dengan realisasi per tanggal.</p></section>
     <section className="panel"><h3>Unit pelaporan</h3>
         <label>Unit/cabang pelaporan<div className="rpl-upload-uker"><ReplenishAutocomplete source="uker" optionsUrl={`${API}?uker_options=1`} selected={selectedUker} disabled={!!busy || parametersBusy} placeholder="Cari nama unit/cabang" onSelect={option => { setSelectedUker(option); invalidate() }} /></div><small>Pilih unit/cabang dari Master Uker berdasarkan nama_uker.</small></label>
     </section>

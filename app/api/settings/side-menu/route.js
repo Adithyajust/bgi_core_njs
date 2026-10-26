@@ -23,21 +23,6 @@ function createErrorResponse(message, status = 400) {
 
 async function authorizeSettings(request, action = "view") {
   const authorization = await authorizeApiRequest(request, "/settings", action)
-
-  if (!authorization.authorized) {
-    return authorization
-  }
-
-  if (authorization.user.role_code !== "SUPER_ADMIN") {
-    return {
-      authorized: false,
-      response: createErrorResponse(
-        "Hanya Super Admin yang dapat mengelola side menu.",
-        403
-      ),
-    }
-  }
-
   return authorization
 }
 

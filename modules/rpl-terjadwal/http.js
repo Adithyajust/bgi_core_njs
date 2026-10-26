@@ -1,13 +1,11 @@
 import { NextResponse } from "next/server"
-import { authorizeApiRequest, isSuperAdmin } from "@/lib/access-control"
+import { authorizeApiRequest } from "@/lib/access-control"
 import { MAX_FILE_BYTES, UploadError } from "./workbook.js"
 
 export const json = (data, status = 200) => NextResponse.json(data, { status, headers: { "Cache-Control": "no-store" } })
 
 export async function authorize(request, action) {
   const auth = await authorizeApiRequest(request, "/rpl_terjadwal", action)
-  if (!auth.authorized) return auth
-  if (!isSuperAdmin(auth.user)) return { authorized: false, response: json({ success: false, message: "RPL Terjadwal hanya untuk Super Admin." }, 403) }
   return auth
 }
 export function errorResponse(error) {

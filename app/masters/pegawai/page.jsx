@@ -17,6 +17,7 @@ const JABATAN_OPTIONS = [
   "Custody",
   "Driver",
   "CPC",
+  "Project Manager"
 ]
 
 const EMPTY_PEGAWAI_FORM = {

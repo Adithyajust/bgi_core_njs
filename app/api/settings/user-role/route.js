@@ -124,22 +124,6 @@ function validateEmail(email) {
 
 async function authorizeSettings(request, action = "view") {
   const authorization = await authorizeApiRequest(request, "/settings", action)
-
-  if (!authorization.authorized) {
-    return authorization
-  }
-
-  if (authorization.user.role_code !== ROLE_CODE_SUPER_ADMIN) {
-    return {
-      authorized: false,
-      user: authorization.user,
-      response: createErrorResponse(
-        "Hanya Super Admin yang dapat mengelola user dan role.",
-        403
-      ),
-    }
-  }
-
   return authorization
 }
 

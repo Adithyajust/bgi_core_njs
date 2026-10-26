@@ -49,6 +49,7 @@ export function ReplenishAutocomplete({
   optionsUrl = "",
 }) {
   const wrapperRef = useRef(null)
+  const menuRef = useRef(null)
   const [query, setQuery] = useState(selected?.label || "")
   const [options, setOptions] = useState([])
   const [open, setOpen] = useState(false)
@@ -70,7 +71,12 @@ export function ReplenishAutocomplete({
 
   useEffect(() => {
     function closeOutside(event) {
-      if (!wrapperRef.current?.contains(event.target)) setOpen(false)
+      if (
+        !wrapperRef.current?.contains(event.target) &&
+        !menuRef.current?.contains(event.target)
+      ) {
+        setOpen(false)
+      }
     }
 
     document.addEventListener("mousedown", closeOutside)
@@ -162,13 +168,17 @@ export function ReplenishAutocomplete({
       </div>
 
       {open && !disabled && typeof document !== "undefined" && menuPosition ? createPortal(
-        <div className="replenish-autocomplete-menu replenish-autocomplete-menu-portal" style={{
-          position: "fixed",
-          top: menuPosition.top,
-          left: menuPosition.left,
-          width: menuPosition.width,
-          zIndex: 999999
-        }}>
+        <div
+          className="replenish-autocomplete-menu replenish-autocomplete-menu-portal"
+          ref={menuRef}
+          style={{
+            position: "fixed",
+            top: menuPosition.top,
+            left: menuPosition.left,
+            width: menuPosition.width,
+            zIndex: 999999
+          }}
+        >
           {source !== "uker" && !ukerId ? (
             <p>Pilih unit kerja terlebih dahulu.</p>
           ) : loading ? (
@@ -182,7 +192,9 @@ export function ReplenishAutocomplete({
               <button
                 key={option.value}
                 type="button"
-                onClick={() => {
+                onMouseDown={(e) => {
+                  // Prevent input blur before selection
+                  e.preventDefault()
                   onSelect(option)
                   setQuery(clearOnSelect ? "" : option.label)
                   if (clearOnSelect) setOptions([])
